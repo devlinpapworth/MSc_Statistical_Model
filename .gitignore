@@ -1,0 +1,26 @@
+# Visual Studio / IDE
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+.ipynb_checkpoints/
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# OS junk
+.DS_Store
+Thumbs.db
