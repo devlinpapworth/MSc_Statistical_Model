@@ -53,7 +53,12 @@ def _build_psd_features(df_psd: pd.DataFrame) -> pd.DataFrame:
     if {"D80", "D20"}.issubset(feats.columns):
         feats["D80_over_D20"] = _safe_ratio(feats["D80"], feats["D20"], "D80_over_D20")
 
+    # >>> ADDED: D90/D10 <<<
+    if {"D90", "D10"}.issubset(feats.columns):
+        feats["D90_over_D10"] = _safe_ratio(feats["D90"], feats["D10"], "D90_over_D10")
+
     return feats
+
 
 
 def _vif_table(X: pd.DataFrame) -> pd.DataFrame:
@@ -205,9 +210,12 @@ def fit_stepwise_models(
     df = pd.merge(df_db, feats, on="Sample Code", how="inner")
 
     # --- Define X and y's ---
-    base_feats = [c for c in ["D10","D20","D50","D80","D90",
-                              "D90_over_D50","D50_over_D10","D80_over_D20"]
-                  if c in df.columns]
+    base_feats = [c for c in [
+        "D10","D20","D50","D80","D90",
+        "D90_over_D50","D50_over_D10","D80_over_D20",
+        "D90_over_D10"   # <<< ADDED
+    ] if c in df.columns]
+
 
     if len(base_feats) == 0:
         raise ValueError("No PSD features available after merging. Check your PSD sheet columns.")
