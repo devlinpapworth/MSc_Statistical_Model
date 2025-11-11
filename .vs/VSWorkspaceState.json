@@ -1,7 +1,9 @@
 {
   "ExpandedNodes": [
-    ""
+    "",
+    "\\base_code",
+    "\\Plotting"
   ],
-  "SelectedNode": "\\C:\\Users\\devli\\Source\\Repos\\MSc_Statistical_Model",
+  "SelectedNode": "\\Plotting\\plot_stepwise_results.py",
   "PreviewInSolutionExplorer": false
 }
