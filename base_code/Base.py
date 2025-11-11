@@ -1,21 +1,5 @@
 # Models/stepwise_psd_models.py
 # -*- coding: utf-8 -*-
-"""
-Stepwise AIC OLS models for PSD -> moisture/porosity with standardized predictors.
-- Reads DB & PSD, filters 'flag' == include, engineers PSD features & ratios
-- Train/test split, StandardScaler on X
-- Stepwise forward/backward selection (AIC-driven; optional p-value gates)
-- Fits OLS, prints summary, VIF table, and a human-readable effects report
-- Saves test-set predictions CSV and per-target effects CSVs
-
-Usage (from Python):
-    from Models.stepwise_psd_models import fit_stepwise_models
-    fit_stepwise_models("path/to/data.xlsx")
-
-CLI:
-    python -m Models.stepwise_psd_models path/to/data.xlsx
-"""
-
 import sys
 import warnings
 from typing import List, Tuple, Optional, Dict, Any
@@ -26,11 +10,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import statsmodels.api as sm
 
-
-# ---------------------------
-# Utilities
-# ---------------------------
-
+# error checking
 def _flag_include_only(df: pd.DataFrame) -> pd.DataFrame:
     """
     Keep rows where 'flag' contains 'include' (case-insensitive).
@@ -42,7 +22,7 @@ def _flag_include_only(df: pd.DataFrame) -> pd.DataFrame:
     mask = df["flag"].astype(str).str.lower().str.contains("include", na=False)
     return df.loc[mask].copy()
 
-
+# error checking
 def _safe_ratio(a: pd.Series, b: pd.Series, name: str) -> pd.Series:
     """Compute a/b, guarding against zero/NaN denominators."""
     out = pd.Series(np.nan, index=a.index, name=name, dtype=float)
@@ -50,7 +30,7 @@ def _safe_ratio(a: pd.Series, b: pd.Series, name: str) -> pd.Series:
     out.loc[valid] = a.loc[valid] / b.loc[valid]
     return out
 
-
+# taking in PSD data plus do calcs
 def _build_psd_features(df_psd: pd.DataFrame) -> pd.DataFrame:
     """
     Expect columns: 'Sample Code' and any of D10,D20,D50,D80,D90.
@@ -76,9 +56,8 @@ def _build_psd_features(df_psd: pd.DataFrame) -> pd.DataFrame:
 
     return feats
 
-
+# VIF table for chsoen PSD characteristisc = Variance Inflation Factors (VIF)
 def _vif_table(X: pd.DataFrame) -> pd.DataFrame:
-    """Compute a quick VIF table (informational)."""
     from statsmodels.stats.outliers_influence import variance_inflation_factor
     X_ = X.dropna().copy()
     X_ = sm.add_constant(X_, has_constant='add')
@@ -87,12 +66,12 @@ def _vif_table(X: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({"feature": names, "VIF": vifs})
 
 
-def _sig_stars(p: float) -> str:
-    if p < 1e-3: return "***"
-    if p < 1e-2: return "**"
-    if p < 5e-2: return "*"
-    if p < 1e-1: return "."
-    return ""
+# def _sig_stars(p: float) -> str:
+#     if p < 1e-3: return "***"
+#     if p < 1e-2: return "**"
+#     if p < 5e-2: return "*"
+#     if p < 1e-1: return "."
+#     return ""
 
 
 # def _print_effects(model: sm.regression.linear_model.RegressionResultsWrapper,
@@ -142,11 +121,7 @@ def _sig_stars(p: float) -> str:
     #     except Exception as e:
     #         warnings.warn(f"Could not save effect CSV: {e}")
 
-
-# ---------------------------
-# Stepwise (AIC) selection
-# ---------------------------
-
+    #AIC func
 def stepwise_aic(
     X: pd.DataFrame,
     y: pd.Series,
@@ -161,11 +136,7 @@ def stepwise_aic(
     pvalue_gate_out: Optional[float] = None,    # e.g. 0.10 to allow remove if p 0.10
 ) -> Tuple[List[str], Optional[sm.regression.linear_model.RegressionResultsWrapper]]:
     """
-    Forward-backward stepwise selection using AIC on an OLS model.
-    If pvalue_gate_in/out are provided, we also require those tests to pass
-    for a candidate add/remove to be considered.
-
-    Returns (selected_feature_names, final_model).
+    Forward-backward stepwise selection using AIC on an OLS model.    
     """
     X = X.copy()
     y = y.copy()
@@ -254,9 +225,7 @@ def stepwise_aic(
     return selected, current_model
 
 
-# ---------------------------
-# Main modeling function
-# ---------------------------
+#Main func
 
 def fit_stepwise_models(
     xlsx_path: str,
@@ -273,11 +242,11 @@ def fit_stepwise_models(
     warn_vif_gt: Optional[float] = 10.0,   # warn if any selected VIF exceeds this
 ) -> Dict[str, Any]:
     """
-    Pipeline:
+    Steps:
       1) Read DB & PSD, keep rows with flag == include
-      2) Engineer PSD features & merge
-      3) Train/test split (shared across targets), standardize X
-      4) Stepwise-AIC OLS models for two targets (optional p-value gates)
+      2) PSD features & merge
+      3) Train/test split, standardize X
+      4) Stepwise-AIC OLS models for two targets 
       5) Print summaries, effects, VIFs; save predictions CSV
     Returns dict with per-target results and scaler.
     """
@@ -424,10 +393,6 @@ def fit_stepwise_models(
         "scaler": scaler,
     }
 
-
-# ---------------------------
-# CLI entry
-# ---------------------------
 
 if __name__ == "__main__":
     if len(sys.argv) == 2:
