@@ -53,7 +53,10 @@ def _build_psd_features(df_psd: pd.DataFrame) -> pd.DataFrame:
         feats["D80_over_D20"] = _safe_ratio(feats["D80"], feats["D20"], "D80_over_D20")
     if {"D90", "D10"}.issubset(feats.columns):
         feats["D90_over_D10"] = _safe_ratio(feats["D90"], feats["D10"], "D90_over_D10")
-
+    if {"D80", "D50"}.issubset(feats.columns):
+        feats["D80_over_D50"] = _safe_ratio(feats["D80"], feats["D50"], "D80_over_D50")
+    if {"D80", "D50"}.issubset(feats.columns):
+        feats["D50_over_D20"] = _safe_ratio(feats["D50"], feats["D20"], "D50_over_D20")
     return feats
 
 # VIF table for chsoen PSD characteristisc = Variance Inflation Factors (VIF)
@@ -272,7 +275,7 @@ def fit_stepwise_models(
     # --- Define X and y's ---
     base_feats = [c for c in [
         "D10", "D20", "D50", "D80", "D90",
-        "D90_over_D50", "D50_over_D10", "D80_over_D20", "D90_over_D10"
+        "D90_over_D50", "D50_over_D10", "D80_over_D20", "D90_over_D10", "D50_over_D20", "D80_over_50"
     ] if c in df.columns]
 
     if len(base_feats) == 0:
