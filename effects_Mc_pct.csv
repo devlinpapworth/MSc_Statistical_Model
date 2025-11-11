@@ -1,0 +1,4 @@
+feature,beta,p_value,sig,ci_low,ci_high,direction,interpretation
+D10,0.1322397852509997,2.128016592105108e-08,***,0.09606343574192591,0.16841613476007347,increases,"As D10 increases by 1 SD, Final moisture increases by 0.132 (?=0.132***, p=2.13e-08, 95% CI [0.096, 0.168])."
+D20,-0.15341264949766634,2.0135462435568747e-09,***,-0.19092133912623346,-0.11590395986909921,decreases,"As D20 increases by 1 SD, Final moisture decreases by 0.153 (?=-0.153***, p=2.01e-09, 95% CI [-0.191, -0.116])."
+D80_over_D20,-0.032012986607127356,1.168856907869857e-12,***,-0.03771920945535418,-0.02630676375890053,decreases,"As D80_over_D20 increases by 1 SD, Final moisture decreases by 0.032 (?=-0.032***, p=1.17e-12, 95% CI [-0.038, -0.026])."

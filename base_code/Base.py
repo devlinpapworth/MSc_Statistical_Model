@@ -1,13 +1,31 @@
 # Models/stepwise_psd_models.py
 # -*- coding: utf-8 -*-
+"""
+Stepwise AIC OLS models for PSD -> moisture/porosity with standardized predictors.
+- Reads DB & PSD, filters 'flag' == include, engineers PSD features & ratios
+- Train/test split, StandardScaler on X
+- Stepwise forward/backward selection (AIC-driven; optional p-value gates)
+- Fits OLS, prints summary, VIF table, and a human-readable effects report
+- Saves test-set predictions CSV and per-target effects CSVs
+
+Usage (from Python):
+    from Models.stepwise_psd_models import fit_stepwise_models
+    fit_stepwise_models("path/to/data.xlsx")
+
+CLI:
+    python -m Models.stepwise_psd_models path/to/data.xlsx
+"""
+
+import sys
 import warnings
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import statsmodels.api as sm
+
 
 # ---------------------------
 # Utilities
@@ -35,30 +53,28 @@ def _safe_ratio(a: pd.Series, b: pd.Series, name: str) -> pd.Series:
 
 def _build_psd_features(df_psd: pd.DataFrame) -> pd.DataFrame:
     """
-    Expect columns at least: 'Sample Code' and some of D10,D20,D50,D80,D90.
-    Creates ratio features too. Returns a tidy feature frame keyed by 'Sample Code'.
+    Expect columns: 'Sample Code' and any of D10,D20,D50,D80,D90.
+    Creates ratio features too. Returns feature frame keyed by 'Sample Code'.
     """
     needed_any = ["D10", "D20", "D50", "D80", "D90"]
     missing = [c for c in needed_any if c not in df_psd.columns]
     if missing:
-        warnings.warn(f"Missing PSD columns {missing}. Continue with what is available.")
+        warnings.warn(f"Missing PSD columns {missing}. Continuing with available columns.")
 
-    feats = df_psd[["Sample Code"] + [c for c in needed_any if c in df_psd.columns]].copy()
+    cols = ["Sample Code"] + [c for c in needed_any if c in df_psd.columns]
+    feats = df_psd[cols].copy()
 
-    # Ratios (compute only if both components exist)
+    # Ratios (compute only if ingredients exist)
     if {"D90", "D50"}.issubset(feats.columns):
         feats["D90_over_D50"] = _safe_ratio(feats["D90"], feats["D50"], "D90_over_D50")
     if {"D50", "D10"}.issubset(feats.columns):
         feats["D50_over_D10"] = _safe_ratio(feats["D50"], feats["D10"], "D50_over_D10")
     if {"D80", "D20"}.issubset(feats.columns):
         feats["D80_over_D20"] = _safe_ratio(feats["D80"], feats["D20"], "D80_over_D20")
-
-    # >>> ADDED: D90/D10 <<<
     if {"D90", "D10"}.issubset(feats.columns):
         feats["D90_over_D10"] = _safe_ratio(feats["D90"], feats["D10"], "D90_over_D10")
 
     return feats
-
 
 
 def _vif_table(X: pd.DataFrame) -> pd.DataFrame:
@@ -69,6 +85,62 @@ def _vif_table(X: pd.DataFrame) -> pd.DataFrame:
     names = ["const"] + list(X_.columns.drop("const"))
     vifs = [variance_inflation_factor(X_.values, i) for i in range(X_.shape[1])]
     return pd.DataFrame({"feature": names, "VIF": vifs})
+
+
+def _sig_stars(p: float) -> str:
+    if p < 1e-3: return "***"
+    if p < 1e-2: return "**"
+    if p < 5e-2: return "*"
+    if p < 1e-1: return "."
+    return ""
+
+
+# def _print_effects(model: sm.regression.linear_model.RegressionResultsWrapper,
+#                    selected: List[str],
+#                    label: str,
+#                    save_csv_path: Optional[str] = None) -> None:
+#     """
+#     Print a tidy 'effects' report for selected features (standardized X):
+#       - coefficient (beta), p-value, 95% CI
+#       - statement: 'as X increases by 1 SD, y increases/decreases by beta units'
+#     Optionally saves a CSV.
+#     """
+#     if model is None or not selected:
+#         print("\nNo effects to report (no features selected).")
+#         return
+
+#     params = model.params.copy()
+#     pvals = model.pvalues.copy()
+#     conf = model.conf_int()
+#     rows: List[Dict[str, Any]] = []
+
+#     print("\nEffect report (standardized predictors):")
+#     print("  ? Interpret B as change in target units per +1 SD of the predictor.\n")
+
+#     for f in selected:
+#         if f not in params.index:
+#             continue
+#         beta = float(params[f])
+#         p = float(pvals.get(f, np.nan))
+#         ci_lo = float(conf.loc[f, 0]) if f in conf.index else np.nan
+#         ci_hi = float(conf.loc[f, 1]) if f in conf.index else np.nan
+#         star = _sig_stars(p)
+#         direction = "decreases" if beta < 0 else "increases"
+#         txt = (f"As {f} increases by 1 SD, {label} {direction} by {abs(beta):.3f} "
+#                f"(?={beta:.3f}{star}, p={p:.3g}, 95% CI [{ci_lo:.3f}, {ci_hi:.3f}]).")
+#         print(" - " + txt)
+#         rows.append({
+#             "feature": f, "beta": beta, "p_value": p, "sig": star,
+#             "ci_low": ci_lo, "ci_high": ci_hi, "direction": direction,
+#             "interpretation": txt
+#         })
+
+    # if save_csv_path:
+    #     try:
+    #         pd.DataFrame(rows).to_csv(save_csv_path, index=False)
+    #         print(f"\nSaved effect table to: {save_csv_path}")
+    #     except Exception as e:
+    #         warnings.warn(f"Could not save effect CSV: {e}")
 
 
 # ---------------------------
@@ -82,10 +154,16 @@ def stepwise_aic(
     initial: Optional[List[str]] = None,
     candidate_features: Optional[List[str]] = None,
     max_steps: int = 50,
+    min_delta_aic: float = 0.0,
     verbose: bool = True,
-) -> Tuple[List[str], sm.regression.linear_model.RegressionResultsWrapper]:
+    # Optional p-value gates (still AIC-driven; p-gates restrict candidates)
+    pvalue_gate_in: Optional[float] = None,     # e.g. 0.05 to allow adds only if  < 0.05
+    pvalue_gate_out: Optional[float] = None,    # e.g. 0.10 to allow remove if p 0.10
+) -> Tuple[List[str], Optional[sm.regression.linear_model.RegressionResultsWrapper]]:
     """
     Forward-backward stepwise selection using AIC on an OLS model.
+    If pvalue_gate_in/out are provided, we also require those tests to pass
+    for a candidate add/remove to be considered.
 
     Returns (selected_feature_names, final_model).
     """
@@ -95,20 +173,18 @@ def stepwise_aic(
     if candidate_features is None:
         candidate_features = list(X.columns)
 
-    if initial is None:
-        selected: List[str] = []
-    else:
+    selected: List[str] = []
+    if initial is not None:
         selected = [f for f in initial if f in candidate_features]
 
-    def fit_aic(cols: List[str]) -> Tuple[float, Optional[sm.regression.linear_model.RegressionResultsWrapper]]:
+    def fit(cols: List[str]) -> Tuple[float, Optional[sm.regression.linear_model.RegressionResultsWrapper]]:
         if len(cols) == 0:
             return np.inf, None
         X_ = sm.add_constant(X[cols], has_constant='add')
-        model = sm.OLS(y, X_, missing='drop').fit()
-        return model.aic, model
+        model_ = sm.OLS(y, X_, missing='drop').fit()
+        return model_.aic, model_
 
-    # Start
-    current_aic, current_model = fit_aic(selected)
+    current_aic, current_model = fit(selected)
     if verbose:
         print(f"Start AIC: {current_aic:.3f} with features={selected}")
 
@@ -119,43 +195,54 @@ def stepwise_aic(
         steps += 1
         improved = False
 
-        # Try forward adds
+        # ----- Try forward adds -----
         remaining = list(set(candidate_features) - set(selected))
-        aic_with_candidates = []
+        add_candidates: List[Tuple[float, str, Optional[sm.regression.linear_model.RegressionResultsWrapper]]] = []
         for c in remaining:
-            aic_c, _ = fit_aic(selected + [c])
-            aic_with_candidates.append((aic_c, c))
+            aic_c, m_c = fit(selected + [c])
+            # Optional p-value gate for entry
+            if pvalue_gate_in is not None and m_c is not None:
+                # p-value for 'c' must be below gate to consider
+                if c in m_c.pvalues.index and not np.isnan(m_c.pvalues[c]):
+                    if m_c.pvalues[c] > pvalue_gate_in:
+                        continue
+                else:
+                    continue
+            add_candidates.append((aic_c, c, m_c))
 
-        if aic_with_candidates:
-            best_add_aic, best_add = min(aic_with_candidates, key=lambda t: t[0])
-        else:
-            best_add_aic, best_add = np.inf, None
+        best_add_aic, best_add, _ = (min(add_candidates, key=lambda t: t[0]) if add_candidates
+                                     else (np.inf, None, None))
 
-        # Try backward removes
-        aic_with_removals = []
+        # ----- Try backward removes -----
+        remove_candidates: List[Tuple[float, str, Optional[sm.regression.linear_model.RegressionResultsWrapper]]] = []
         for c in list(selected):
             cols = [f for f in selected if f != c]
-            aic_c, _ = fit_aic(cols)
-            aic_with_removals.append((aic_c, c))  # AIC if we remove c
+            aic_c, m_c = fit(cols)
+            # Optional p-value gate for removal (use p from current model if available)
+            if pvalue_gate_out is not None and current_model is not None:
+                if c in current_model.pvalues.index and not np.isnan(current_model.pvalues[c]):
+                    # Only allow removal if current p-value is > gate (i.e., not significant)
+                    if current_model.pvalues[c] <= pvalue_gate_out:
+                        continue
+            remove_candidates.append((aic_c, c, m_c))
 
-        if aic_with_removals:
-            best_remove_aic, best_remove = min(aic_with_removals, key=lambda t: t[0])
-        else:
-            best_remove_aic, best_remove = np.inf, None
+        best_remove_aic, best_remove, _ = (min(remove_candidates, key=lambda t: t[0]) if remove_candidates
+                                           else (np.inf, None, None))
 
-        # Decide best move
-        best_move = min(best_add_aic, best_remove_aic, current_aic)
+        # ----- Decide move -----
+        best_current = current_aic
+        best_move = min(best_add_aic, best_remove_aic, best_current)
 
-        if best_add is not None and best_add_aic < current_aic and best_add_aic <= best_remove_aic:
+        if best_add is not None and (best_add_aic + min_delta_aic) < current_aic and best_add_aic <= best_remove_aic:
             selected.append(best_add)
-            current_aic, current_model = fit_aic(selected)
+            current_aic, current_model = fit(selected)
             improved = True
             if verbose:
                 print(f"Step {steps}: ADD {best_add}  -> AIC {current_aic:.3f}")
 
-        elif best_remove is not None and best_remove_aic < current_aic and best_remove_aic < best_add_aic:
+        elif best_remove is not None and (best_remove_aic + min_delta_aic) < current_aic and best_remove_aic < best_add_aic:
             selected.remove(best_remove)
-            current_aic, current_model = fit_aic(selected)
+            current_aic, current_model = fit(selected)
             improved = True
             if verbose:
                 print(f"Step {steps}: REMOVE {best_remove}  -> AIC {current_aic:.3f}")
@@ -180,17 +267,22 @@ def fit_stepwise_models(
     test_size: float = 0.2,
     random_state: int = 42,
     verbose: bool = True,
-):
+    # Optional: add p-value gates and VIF warnings
+    pvalue_gate_in: Optional[float] = None,
+    pvalue_gate_out: Optional[float] = None,
+    warn_vif_gt: Optional[float] = 10.0,   # warn if any selected VIF exceeds this
+) -> Dict[str, Any]:
     """
-    1) Read DB & PSD, keep rows with flag == include
-    2) Engineer PSD features & merge
-    3) Train/test split, standardize X
-    4) Stepwise-AIC OLS models for two targets
-    5) Print summaries and save predictions CSV
+    Pipeline:
+      1) Read DB & PSD, keep rows with flag == include
+      2) Engineer PSD features & merge
+      3) Train/test split (shared across targets), standardize X
+      4) Stepwise-AIC OLS models for two targets (optional p-value gates)
+      5) Print summaries, effects, VIFs; save predictions CSV
+    Returns dict with per-target results and scaler.
     """
-
     # --- Read sheets ---
-    df_db  = pd.read_excel(xlsx_path, sheet_name=sheet_db,  engine="openpyxl")
+    df_db = pd.read_excel(xlsx_path, sheet_name=sheet_db, engine="openpyxl")
     df_psd = pd.read_excel(xlsx_path, sheet_name=sheet_psd, engine="openpyxl")
 
     # --- Keep only 'include' rows in DB ---
@@ -200,7 +292,6 @@ def fit_stepwise_models(
     feats = _build_psd_features(df_psd)
 
     # --- Merge ---
-    # Expect 'Sample Code' in both
     for col in ["Sample Code", target_moisture, target_porosity]:
         if col not in df_db.columns and col != "Sample Code":
             raise ValueError(f"Required column '{col}' not found in DB.")
@@ -211,11 +302,9 @@ def fit_stepwise_models(
 
     # --- Define X and y's ---
     base_feats = [c for c in [
-        "D10","D20","D50","D80","D90",
-        "D90_over_D50","D50_over_D10","D80_over_D20",
-        "D90_over_D10"   # <<< ADDED
+        "D10", "D20", "D50", "D80", "D90",
+        "D90_over_D50", "D50_over_D10", "D80_over_D20", "D90_over_D10"
     ] if c in df.columns]
-
 
     if len(base_feats) == 0:
         raise ValueError("No PSD features available after merging. Check your PSD sheet columns.")
@@ -228,54 +317,75 @@ def fit_stepwise_models(
         df_model.index, test_size=test_size, random_state=random_state
     )
     df_train = df_model.loc[train_idx].copy()
-    df_test  = df_model.loc[test_idx].copy()
+    df_test = df_model.loc[test_idx].copy()
 
     X_train = df_train[base_feats].copy()
-    X_test  = df_test[base_feats].copy()
+    X_test = df_test[base_feats].copy()
 
     # Standardize X (fit on train, apply to test)
     scaler = StandardScaler()
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=base_feats, index=X_train.index)
-    X_test_s  = pd.DataFrame(scaler.transform(X_test),      columns=base_feats, index=X_test.index)
+    X_test_s = pd.DataFrame(scaler.transform(X_test), columns=base_feats, index=X_test.index)
 
-    # Helper to fit one target
-    def fit_one_target(target_col: str, label: str):
+    # Helper: fit one target
+    def fit_one_target(target_col: str, label: str) -> Dict[str, Any]:
         y_train = df_train[target_col].astype(float)
-        y_test  = df_test[target_col].astype(float)
+        y_test_ = df_test[target_col].astype(float)
 
         if verbose:
-            print("\n" + "="*80)
+            print("\n" + "=" * 80)
             print(f"Stepwise model for {label} ({target_col})")
-            print("="*80)
+            print("=" * 80)
 
-        selected, model = stepwise_aic(X_train_s, y_train, candidate_features=base_feats, verbose=verbose)
+        selected, model = stepwise_aic(
+            X_train_s, y_train,
+            candidate_features=base_feats,
+            verbose=verbose,
+            pvalue_gate_in=pvalue_gate_in,
+            pvalue_gate_out=pvalue_gate_out
+        )
 
         # Print model summary
         if model is not None:
             print(model.summary())
 
+        # Human-readable effects report + CSV
+        # _print_effects(
+        #     model,
+        #     selected,
+        #     label,
+        #     save_csv_path=f"effects_{target_col.replace('%','pct').replace(' ','_')}.csv"
+        # )
+
         # Predictions on test
-        if selected:
+        if selected and model is not None:
             X_test_sel = sm.add_constant(X_test_s[selected], has_constant='add')
             y_pred = model.predict(X_test_sel)
         else:
-            # No features selected ? predict mean
-            y_pred = pd.Series(y_train.mean(), index=y_test.index)
+            # No features selected: predict train mean
+            y_pred = pd.Series(y_train.mean(), index=y_test_.index)
 
         # Metrics
-        mae = float(np.mean(np.abs(y_test - y_pred)))
-        rmse = float(np.sqrt(np.mean((y_test - y_pred)**2)))
-        r2 = float(1 - np.sum((y_test - y_pred)**2) / np.sum((y_test - np.mean(y_test))**2))
+        mae = float(np.mean(np.abs(y_test_ - y_pred)))
+        rmse = float(np.sqrt(np.mean((y_test_ - y_pred) ** 2)))
+        r2 = float(1 - np.sum((y_test_ - y_pred) ** 2) / np.sum((y_test_ - np.mean(y_test_)) ** 2))
         if verbose:
             print(f"Selected features ({label}): {selected}")
             print(f"Test MAE={mae:.3f}, RMSE={rmse:.3f}, R^2={r2:.3f}")
 
-        # VIF (informational; use original unscaled X to check raw collinearity if you prefer)
+        # VIF (informational; use original unscaled X to check raw collinearity)
         try:
             if selected:
                 vif = _vif_table(X_train[selected])
                 print("\nVIF (train, selected features):")
                 print(vif.to_string(index=False))
+                if warn_vif_gt is not None:
+                    high = vif.loc[vif["feature"] != "const"].query("VIF > @warn_vif_gt")
+                    if not high.empty:
+                        warnings.warn(
+                            f"High VIF detected > {warn_vif_gt}: "
+                            + ", ".join(f"{r.feature}={r.VIF:.1f}" for _, r in high.iterrows())
+                        )
         except Exception as e:
             warnings.warn(f"VIF calculation failed: {e}")
 
@@ -284,7 +394,7 @@ def fit_stepwise_models(
             "label": label,
             "selected_features": selected,
             "model": model,
-            "y_test": y_test,
+            "y_test": y_test_,
             "y_pred": y_pred,
             "mae": mae,
             "rmse": rmse,
@@ -293,15 +403,15 @@ def fit_stepwise_models(
 
     # Fit both targets
     res_moist = fit_one_target(target_moisture, "Final moisture")
-    res_poro  = fit_one_target(target_porosity, "Cake porosity")
+    res_poro = fit_one_target(target_porosity, "Cake porosity")
 
-    # Save predictions
+    # Save predictions CSV
     out = pd.DataFrame({
         "Sample Code": df_test["Sample Code"],
         f"{target_moisture}_actual": res_moist["y_test"],
-        f"{target_moisture}_pred":   res_moist["y_pred"],
+        f"{target_moisture}_pred": res_moist["y_pred"],
         f"{target_porosity}_actual": res_poro["y_test"],
-        f"{target_porosity}_pred":   res_poro["y_pred"],
+        f"{target_porosity}_pred": res_poro["y_pred"],
     })
     out_path = "stepwise_predictions.csv"
     out.to_csv(out_path, index=False)
@@ -315,7 +425,14 @@ def fit_stepwise_models(
     }
 
 
+# ---------------------------
+# CLI entry
+# ---------------------------
+
 if __name__ == "__main__":
-    # Example usage:
-    # python -m Models.stepwise_psd_models
-    print("Run fit_stepwise_models(xlsx_path='path/to/your.xlsx') from a Python REPL or another script.")
+    if len(sys.argv) == 2:
+        path = sys.argv[1]
+        fit_stepwise_models(path)
+    else:
+        print("Usage:\n  python -m Models.stepwise_psd_models <path/to/data.xlsx>\n"
+              "Or import and call fit_stepwise_models(...) from Python.")

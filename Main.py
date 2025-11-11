@@ -10,8 +10,8 @@ def main():
         sheet_psd="PSD",
         target_moisture="Mc_%",
         target_porosity="Cake_por",
-        test_size=0.2,
-        random_state=42,
+        test_size=0.2, #20% of data used for testing model
+        random_state=42, # seed for repeadtability
         verbose=True
     )
 
