@@ -1,4 +1,3 @@
-# run_stepwise.py
 from base_code.Base import fit_stepwise_models
 from base_code.Export_EQ import print_formulas
 from Plotting.plot_stepwise_results import plots_main
@@ -10,18 +9,23 @@ def main():
         sheet_psd="PSD",
         target_moisture="Mc_%",
         target_porosity="Cake_por",
-        test_size=0.2, #20% of data used for testing model
-        random_state=42, # seed for repeadtability
-        verbose=True
+        test_size=0.2,      # 20% test split
+        random_state=42,     # reproducible split
+        verbose=True,
+        # NEW: choose how to start the stepwise run
+        start_mode="full",  # "empty" = forward; change to "full" for backward
+        # Optional gates (leave None if you want pure AIC-driven):
+        # pvalue_gate_in=0.05,
+        # pvalue_gate_out=0.10,
     )
 
     print("\nSelected (moisture):", results["res_moisture"]["selected_features"])
     print("Selected (porosity):", results["res_porosity"]["selected_features"])
 
-    # === Export raw-input formulas ===
+    # Export closed-form formulas (uses the fitted results/scaler)
     print_formulas(results)
 
-    # this reads stepwise_predictions.csv and shows the plots
+    # This reads stepwise_predictions.csv and makes plots
     plots_main(csv_path="stepwise_predictions.csv", save_path="model_fit")
 
 if __name__ == "__main__":
