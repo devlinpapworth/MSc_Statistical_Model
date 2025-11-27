@@ -192,11 +192,11 @@ def stepwise_aic(
 
 def fit_stepwise_models(
     xlsx_path: str,
-    sheet_db: str = "DB",
+    sheet_db: str = "DB_2",
     sheet_psd: str = "PSD",
     target_moisture: str = "Mc_%",
     target_porosity: str = "Cake_por",
-    test_size: float = 0.2,
+    test_size: float = 0.1,
     random_state: int = 42,
     verbose: bool = True,
     # Optional: add p-value gates and VIF warnings
@@ -235,8 +235,8 @@ def fit_stepwise_models(
 
     # --- Define X and y's ---
     base_feats = [c for c in [
-        "D10", "D20", "D50", "D80", "D90",
-        "D90_over_D50", "D50_over_D10", "D80_over_D20", "D90_over_D10"
+        "D10", "D80",
+        "D90_over_D50", "D50_over_D10", "D80_over_D20"
     ] if c in df.columns]
 
     if len(base_feats) == 0:

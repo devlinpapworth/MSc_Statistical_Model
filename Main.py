@@ -5,15 +5,15 @@ from Plotting.plot_stepwise_results import plots_main
 def main():
     results = fit_stepwise_models(
         xlsx_path=r"C:\Users\devli\OneDrive - Imperial College London\MSci - Devlin (Personal)\Data\FP_db_all.xlsx",
-        sheet_db="DB",
+        sheet_db="DB_2",
         sheet_psd="PSD",
         target_moisture="Mc_%",
         target_porosity="Cake_por",
-        test_size=0.2,      # 20% test split
+        test_size=0.1,      # 20% test split
         random_state=42,     # reproducible split
         verbose=True,
         # NEW: choose how to start the stepwise run
-        start_mode="full",  # "empty" = forward; change to "full" for backward
+        start_mode="empty",  # "empty" = forward; change to "full" for backward
         # Optional gates (leave None if you want pure AIC-driven):
         # pvalue_gate_in=0.05,
         # pvalue_gate_out=0.10,
