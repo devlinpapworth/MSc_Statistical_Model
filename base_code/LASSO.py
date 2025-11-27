@@ -37,9 +37,9 @@ DEFAULT_FEATURE_COLS = [
     "D50",
     "D80",
     "D90",
-    "D90_over_D50",
-    "D50_over_D10",
-    "D80_over_D20"
+    "D90/D50",
+    "D50/D10",
+    "D80/D20"
 ]
 
 # Column name for sample code (must be present in both DB_2 and PSD sheets)
@@ -126,13 +126,17 @@ def merge_db_psd(
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """
     Merge DB_2 and PSD on SAMPLE_CODE_COL, ensure required cols,
+    recompute ratio features (D80/D20, D90/D50, D50/D10) from base D-values,
     and return X (features) and y (target) arrays after dropping NAs.
+    Includes detailed debug printout showing which rows were dropped.
     """
-    # Check columns
-    check_required_columns(df_db, [SAMPLE_CODE_COL, target_col, FLAG_COL], "DB_2")
-    check_required_columns(df_psd, [SAMPLE_CODE_COL] + features, "PSD")
 
-    # Merge
+    # --- Check columns exist ---
+    base_needed = ["D10", "D20", "D50", "D80", "D90"]
+    check_required_columns(df_db, [SAMPLE_CODE_COL, target_col, FLAG_COL], "DB_2")
+    check_required_columns(df_psd, [SAMPLE_CODE_COL] + base_needed, "PSD")
+
+    # --- Merge DB_2 + PSD ---
     df = pd.merge(df_db, df_psd, on=SAMPLE_CODE_COL, how="inner", suffixes=("_db", "_psd"))
     if df.empty:
         error(
@@ -140,27 +144,50 @@ def merge_db_psd(
             f"Check that '{SAMPLE_CODE_COL}' matches between sheets."
         )
 
-    # Keep only needed columns
+    # --- Ensure base D-columns are float ---
+    for col in base_needed:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # --- Recompute ratio columns in Python (override any Excel values) ---
+    if "D80/D20" in features:
+        df["D80/D20"] = df["D80"] / df["D20"]
+    if "D90/D50" in features:
+        df["D90/D50"] = df["D90"] / df["D50"]
+    if "D50/D10" in features:
+        df["D50/D10"] = df["D50"] / df["D10"]
+
+    # --- Select only relevant columns ---
     cols_to_keep = [SAMPLE_CODE_COL, target_col] + features
     df = df[cols_to_keep].copy()
 
-    # Drop rows with any NA in target or features
+    # --- Identify rows with missing values ---
     before = len(df)
-    df = df.dropna(subset=[target_col] + features)
-    after = len(df)
+    missing_mask = df[[target_col] + features].isna().any(axis=1)
+    after = (~missing_mask).sum()
+
+    # --- Print dropped rows for debugging ---
+    if after < before:
+        print(f"\nWarning: dropped {before - after} rows due to NaNs.\n")
+        print("Rows that were dropped because of missing values:\n")
+        print(
+            df.loc[missing_mask, [SAMPLE_CODE_COL, target_col] + features]
+            .to_string(index=False)
+        )
+        print("\n--- End of dropped row report ---\n")
+
+    # --- Keep only complete rows ---
+    df = df.loc[~missing_mask].copy()
 
     if df.empty:
         error("All rows dropped due to missing values in target/features.")
-    if after < before:
-        print(
-            f"Warning: dropped {before - after} rows due to NaNs in "
-            f"{[target_col] + features}"
-        )
 
+    # --- Build matrices for regression ---
     X = df[features].to_numpy(dtype=float)
     y = df[target_col].to_numpy(dtype=float)
 
     return df, X, y
+
+
 
 
 def fit_lasso(X: np.ndarray, y: np.ndarray) -> Pipeline:
