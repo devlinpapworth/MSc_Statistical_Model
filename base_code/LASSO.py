@@ -2,6 +2,9 @@
 """
 LASSO regression on PSD indices with DB_2/PSD merge,
 flag filtering ("include"), and robust error checking.
+Now includes operational variables:
+  - A_Flow  (airflow, from DB_2)
+  - Diaphragm_on (binary, derived from Test_procedure: 1=STD, 0=No_pres/other)
 """
 
 import argparse
@@ -30,7 +33,9 @@ DEFAULT_XLSX_PATH = r"C:\Users\devli\OneDrive - Imperial College London\MSci - D
 
 DEFAULT_TARGET_COL = "Mc_%"
 
+# PSD + operational features
 DEFAULT_FEATURE_COLS = [
+    # PSD indices
     "D10",
     "D20",
     "D50",
@@ -39,10 +44,15 @@ DEFAULT_FEATURE_COLS = [
     "D90/D50",
     "D50/D10",
     "D80/D20",
+    # operational variables from DB_2
+    "A_Flow",
+    "Diaphragm_on",
 ]
 
 SAMPLE_CODE_COL = "Sample Code"
 FLAG_COL = "flag"
+TEST_PROC_COL = "Test_procedure"
+AFLOW_COL = "A_Flow"
 
 
 # ---------------------------------------------------------------------
@@ -105,11 +115,17 @@ def apply_flag_filter(df_db: pd.DataFrame) -> pd.DataFrame:
 def merge_db_psd(df_db, df_psd, features, target_col):
     """
     Merge DB_2 and PSD on sample code, recompute ratio features,
-    drop rows with missing data, and return df, X, y.
+    engineer operational variables, drop rows with missing data,
+    and return df, X, y.
     """
 
+    # Base PSD D-values required from PSD sheet
     base_needed = ["D10", "D20", "D50", "D80", "D90"]
-    check_required_columns(df_db, [SAMPLE_CODE_COL, target_col, FLAG_COL], "DB_2")
+
+    # Required DB_2 columns (for target, flags and operational vars)
+    db_required = [SAMPLE_CODE_COL, target_col, FLAG_COL, TEST_PROC_COL, AFLOW_COL]
+
+    check_required_columns(df_db, db_required, "DB_2")
     check_required_columns(df_psd, [SAMPLE_CODE_COL] + base_needed, "PSD")
 
     df = pd.merge(df_db, df_psd, on=SAMPLE_CODE_COL, how="inner")
@@ -126,6 +142,15 @@ def merge_db_psd(df_db, df_psd, features, target_col):
     df["D90/D50"] = df["D90"] / df["D50"]
     df["D50/D10"] = df["D50"] / df["D10"]
 
+    # Operational variables
+    df[AFLOW_COL] = pd.to_numeric(df[AFLOW_COL], errors="coerce")
+
+    # Diaphragm_on: 1 if Test_procedure contains "STD", else 0
+    df["Diaphragm_on"] = df[TEST_PROC_COL].astype(str).str.contains(
+        "STD", case=False, na=False
+    ).astype(int)
+
+    # Select only needed columns
     cols_to_keep = [SAMPLE_CODE_COL, target_col] + features
     df = df[cols_to_keep].copy()
 
@@ -247,7 +272,6 @@ def plot_predicted_vs_actual(y_true: np.ndarray, y_pred: np.ndarray, save_path: 
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
-
 
 
 def plot_pdp_1d(
