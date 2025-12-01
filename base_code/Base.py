@@ -3,6 +3,9 @@
 """
 Stepwise AIC OLS models for PSD -> moisture/porosity with standardized predictors.
 - Reads DB & PSD, filters 'flag' == include, engineers PSD features & ratios
+- Adds operational variables:
+    * A_Flow (airflow, from DB_2)
+    * Diaphragm_on (binary, from Test_procedure: 1=STD, 0=other)
 - Train/test split, StandardScaler on X
 - Stepwise forward/backward selection (AIC-driven; optional p-value gates)
 - Fits OLS, prints summary, VIF table
@@ -210,9 +213,10 @@ def fit_stepwise_models(
     Pipeline:
       1) Read DB & PSD, keep rows with flag == include
       2) Engineer PSD features & merge
-      3) Train/test split (shared), standardize X
-      4) Stepwise-AIC OLS models for two targets
-      5) Print summaries, VIFs; save predictions CSV
+      3) Add operational variables (A_Flow, Diaphragm_on)
+      4) Train/test split (shared), standardize X
+      5) Stepwise-AIC OLS models for two targets
+      6) Print summaries, VIFs; save predictions CSV
     """
     # --- Read sheets ---
     df_db = pd.read_excel(xlsx_path, sheet_name=sheet_db, engine="openpyxl")
@@ -233,14 +237,29 @@ def fit_stepwise_models(
 
     df = pd.merge(df_db, feats, on="Sample Code", how="inner")
 
+    # --- Engineer operational variables (A_Flow, Diaphragm_on) ---
+    if "A_Flow" in df.columns:
+        df["A_Flow"] = pd.to_numeric(df["A_Flow"], errors="coerce")
+    else:
+        warnings.warn("Column 'A_Flow' not found in DB; airflow will not be used.")
+
+    if "Test_procedure" in df.columns:
+        df["Diaphragm_on"] = df["Test_procedure"].astype(str).str.contains(
+            "STD", case=False, na=False
+        ).astype(int)
+    else:
+        warnings.warn("Column 'Test_procedure' not found in DB; Diaphragm_on will not be used.")
+
     # --- Define X and y's ---
-    base_feats = [c for c in [
+    candidate_feats = [
         "D10", "D80",
-        "D90_over_D50", "D50_over_D10", "D80_over_D20"
-    ] if c in df.columns]
+        "D90_over_D50", "D50_over_D10", "D80_over_D20",
+        "A_Flow", "Diaphragm_on",
+    ]
+    base_feats = [c for c in candidate_feats if c in df.columns]
 
     if len(base_feats) == 0:
-        raise ValueError("No PSD features available after merging. Check your PSD sheet columns.")
+        raise ValueError("No PSD/operational features available after merging. Check your DB/PSD sheets.")
 
     # Drop rows missing targets or features
     df_model = df[["Sample Code", target_moisture, target_porosity] + base_feats].dropna()
