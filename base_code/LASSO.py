@@ -13,7 +13,7 @@ for non-linear comparison.
 
 Also includes interaction features so LASSO can model
 "diaphragm effect depends on PSD":
-  - D10_Dia  = D20 * Diaphragm_on
+  - D10_Dia  = D10 * Diaphragm_on
   - Span_Dia = (D80/D20) * Diaphragm_on
 
 Training is done on a subset of sheet 'DB_2'.
@@ -69,7 +69,7 @@ DEFAULT_FEATURE_COLS = [
     "A_Flow",
     "Diaphragm_on",
     # interactions (PSD x Diaphragm)
-    "D10_Dia",   # D20 * Diaphragm_on
+    "D10_Dia",   # D10 * Diaphragm_on
     "Span_Dia",  # (D80/D20) * Diaphragm_on
 ]
 
@@ -397,20 +397,15 @@ def plot_pdp_2d_d20_span(
     pipe: Pipeline,
     df: pd.DataFrame,
     features: list[str],
-    feature_x: str = "D20",
+    feature_x: str = "D10",
     feature_y: str = "D80/D20",
     nx: int = 40,
     ny: int = 40,
-    title: str = "Predicted FMC as a function of D20 and D80/D20",
+    title: str = "Predicted FMC as a function of D10 and D80/D20",
     save_path: Optional[str] = None,
 ):
-    """
-    2D partial dependence-style plot:
-      x-axis: D20
-      y-axis: D80/D20
-      colour: predicted FMC (%).
-    Other features are held at their mean values.
-    """
+    
+    # Ensure both features exist
     for f in (feature_x, feature_y):
         if f not in features:
             raise ValueError(f"{f} is not in feature list {features}")
@@ -428,7 +423,7 @@ def plot_pdp_2d_d20_span(
     grid[:, ix] = XX.ravel()
     grid[:, iy] = YY.ravel()
 
-    Z = 100 * pipe.predict(grid).reshape(ny, nx)  # convert to %
+    Z = 100 * pipe.predict(grid).reshape(ny, nx)
 
     fig, ax = plt.subplots(figsize=(7, 5))
     cf = ax.contourf(XX, YY, Z, levels=15)
@@ -439,13 +434,30 @@ def plot_pdp_2d_d20_span(
     ax.set_ylabel(feature_y)
     ax.set_title(title)
 
+    # ---- Vertical RED line at exactly D20 = 20 m ----
+    x_line = 22.0
+    ax.axvline(x_line, linestyle=":", color="red", linewidth=1.8)
+
+    # Label the vertical line
+    y_mid = (df[feature_y].min() + df[feature_y].max()) / 2
+    ax.text(
+        x_line,
+        y_mid,
+        "Diaphragm\nthreshold",
+        color="red",
+        fontsize=9,
+        ha="left",
+        va="center",
+        rotation=90,
+        rotation_mode="anchor",
+    )
+
     plt.tight_layout()
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
 
-
-def plot_pdp_d20_diaphragm(
+def plot_pdp_d10_diaphragm(
     pipe: Pipeline,
     df: pd.DataFrame,
     features: list[str],
@@ -453,27 +465,27 @@ def plot_pdp_d20_diaphragm(
     save_path: Optional[str] = None,
 ):
     """
-    1D PDP for D20 with two curves:
+    1D PDP for D10 with two curves:
       - Diaphragm_on = 0
       - Diaphragm_on = 1
 
     Interaction features (D10_Dia, Span_Dia) are recomputed so they stay
     consistent with the chosen Diaphragm_on.
     """
-    required = {"D20", "Diaphragm_on", "D10_Dia", "Span_Dia", "D80/D20"}
+    required = {"D10", "Diaphragm_on", "D10_Dia", "Span_Dia", "D80/D20"}
     if not required.issubset(features):
         raise ValueError(f"Features must include {required} for this plot.")
 
     base_row = df[features].mean()
-    x_vals = np.linspace(df["D20"].min(), df["D20"].max(), n_points)
+    x_vals = np.linspace(df["D10"].min(), df["D10"].max(), n_points)
 
     preds = {}
     for dia in [0, 1]:
         grid_df = pd.DataFrame([base_row] * n_points)
-        grid_df["D20"] = x_vals
+        grid_df["D10"] = x_vals
         grid_df["Diaphragm_on"] = dia
-        # recompute interactions
-        grid_df["D10_Dia"] = grid_df["D20"] * grid_df["Diaphragm_on"]
+        # recompute interactions correctly using D10
+        grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
 
         y_pred = 100 * pipe.predict(grid_df[features].to_numpy(dtype=float))
@@ -483,9 +495,9 @@ def plot_pdp_d20_diaphragm(
     ax.plot(x_vals, preds[0], label="No diaphragm", linewidth=2)
     ax.plot(x_vals, preds[1], label="Diaphragm on", linewidth=2)
 
-    ax.set_xlabel("D20 (\u00B5m)")
+    ax.set_xlabel("D10 (\u00B5m)")
     ax.set_ylabel("Predicted FMC (%)")
-    ax.set_title("Effect of diaphragm across D20 (LASSO)")
+    ax.set_title("Effect of diaphragm across D10 (Model)")
     ax.grid(True, alpha=0.3)
     ax.legend()
 
@@ -495,7 +507,7 @@ def plot_pdp_d20_diaphragm(
     plt.show()
 
 
-def plot_delta_d20_diaphragm(
+def plot_delta_d10_diaphragm(
     pipe: Pipeline,
     df: pd.DataFrame,
     features: list[str],
@@ -503,23 +515,23 @@ def plot_delta_d20_diaphragm(
     save_path: Optional[str] = None,
 ):
     """
-    Plot ?FMC(D20) = FMC(diaphragm on) - FMC(no diaphragm) vs D20
+    Plot ?FMC(D10) = FMC(diaphragm on) - FMC(no diaphragm) vs D10
     for the LASSO model. This will always be a straight line
     because LASSO is linear (even with interactions).
     """
-    required = {"D20", "Diaphragm_on", "D10_Dia", "Span_Dia", "D80/D20"}
+    required = {"D10", "Diaphragm_on", "D10_Dia", "Span_Dia", "D80/D20"}
     if not required.issubset(features):
         raise ValueError(f"Features must include {required} for this plot.")
 
     base_row = df[features].mean()
-    x_vals = np.linspace(df["D20"].min(), df["D20"].max(), n_points)
+    x_vals = np.linspace(df["D10"].min(), df["D10"].max(), n_points)
 
     preds = {}
     for dia in [0, 1]:
         grid_df = pd.DataFrame([base_row] * n_points)
-        grid_df["D20"] = x_vals
+        grid_df["D10"] = x_vals
         grid_df["Diaphragm_on"] = dia
-        grid_df["D10_Dia"] = grid_df["D20"] * grid_df["Diaphragm_on"]
+        grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
 
         y_pred = 100 * pipe.predict(grid_df[features].to_numpy(dtype=float))
@@ -531,9 +543,9 @@ def plot_delta_d20_diaphragm(
     ax.plot(x_vals, delta, linewidth=2)
 
     ax.axhline(0.0, linestyle="--", color="grey", linewidth=1)
-    ax.set_xlabel("D20 (\u00B5m)")
+    ax.set_xlabel("D10 (\u00B5m)")
     ax.set_ylabel("\u0394FMC (Dia - No Dia) (%)")
-    ax.set_title("Additional effect of diaphragm vs D20 (LASSO)")
+    ax.set_title("Effect of diaphragm vs D10 (Model)")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -554,13 +566,13 @@ def plot_delta_dia_tree(
     """
     Compute the diaphragm effect using a NON-LINEAR model (RF or GB):
 
-        ?FMC(D20) = FMC_dia(D20) - FMC_no_dia(D20)
+        ?FMC(feature_x) = FMC_dia(feature_x) - FMC_no_dia(feature_x)
 
     If this curve is curved (not a straight line), the diaphragm
-    effect is genuinely nonlinear in D20.
+    effect is genuinely nonlinear in that variable.
     """
-    required = {"D20", "Diaphragm_on", "D10_Dia", "Span_Dia", "D80/D20"}
-    if not required.issubset(features):
+    required = {"D20", "Diaphragm_on", "D10_Dia", "Span_Dia", "D80/D20", "D10"}
+    if not required.issubset(set(features)):
         raise ValueError(f"Features must include {required} for this plot.")
 
     base_row = df[features].mean()
@@ -569,9 +581,10 @@ def plot_delta_dia_tree(
     preds = {}
     for dia in [0, 1]:
         grid_df = pd.DataFrame([base_row] * n_points)
-        grid_df["D20"] = x_vals
+        grid_df[feature_x] = x_vals
         grid_df["Diaphragm_on"] = dia
-        grid_df["D10_Dia"] = grid_df["D20"] * grid_df["Diaphragm_on"]
+        # D10 stays at mean; D10_Dia uses D10, not D20
+        grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
 
         y_pred = 100 * model.predict(grid_df[features].to_numpy(dtype=float))
@@ -583,9 +596,9 @@ def plot_delta_dia_tree(
     ax.plot(x_vals, delta, linewidth=2)
 
     ax.axhline(0.0, linestyle="--", color="grey", linewidth=1)
-    ax.set_xlabel("D20 (\u00B5m)")
+    ax.set_xlabel(f"{feature_x} (\u00B5m)" if "D" in feature_x else feature_x)
     ax.set_ylabel("\u0394FMC (Dia - No Dia) (%)")
-    ax.set_title(f"Nonlinear diaphragm effect vs D20 ({model_name})")
+    ax.set_title(f"Nonlinear diaphragm effect vs {feature_x} ({model_name})")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -594,6 +607,411 @@ def plot_delta_dia_tree(
     plt.show()
 
 
+# ---------------------------------------------------------------------
+# NEW: Empirical diaphragm plots from data (no ML model)
+# ---------------------------------------------------------------------
+
+def plot_empirical_d10_diaphragm(
+    df: pd.DataFrame,
+    target_col: str = DEFAULT_TARGET_COL,
+    title: str = "FMC vs D10 for diaphragm on/off",
+    save_path: Optional[str] = None,
+):
+    """
+    X-axis = D10
+    Labels = Span (D80/D20)
+    Thick connection lines drawn between dia_off and dia_on for same D10 cluster.
+    """
+    required = {"D10", "D80/D20", "Diaphragm_on", target_col}
+    if not required.issubset(df.columns):
+        raise ValueError(f"DataFrame must contain: {required}")
+
+    df0 = df[df["Diaphragm_on"] == 0].copy()
+    df1 = df[df["Diaphragm_on"] == 1].copy()
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    # convert to %
+    df0["Mc_pct"] = 100 * df0[target_col]
+    df1["Mc_pct"] = 100 * df1[target_col]
+
+    # scatter
+    ax.scatter(df0["D10"], df0["Mc_pct"], label="No diaphragm", alpha=0.8, edgecolors="k")
+    ax.scatter(df1["D10"], df1["Mc_pct"], label="Diaphragm on", alpha=0.8, edgecolors="k")
+
+    # ---------- thick connection lines ----------
+    unique_d10 = sorted(df["D10"].unique())
+    for d in unique_d10:
+        g0 = df0[df0["D10"] == d]["Mc_pct"]
+        g1 = df1[df1["D10"] == d]["Mc_pct"]
+        if len(g0) > 0 and len(g1) > 0:
+            ax.plot(
+                [d, d],
+                [g0.mean(), g1.mean()],
+                color="grey",
+                linewidth=2.5,
+                alpha=0.8,
+            )
+
+    # ---------- cluster labels (Span) ----------
+    df_all = df.copy()
+    df_all["Mc_pct"] = 100 * df_all[target_col]
+
+    stats = (
+        df_all
+        .groupby("D10")
+        .agg(
+            Span_mean=("D80/D20", "mean"),
+            Mc_max=("Mc_pct", "max"),
+        )
+        .reset_index()
+    )
+
+    y_range = df_all["Mc_pct"].max() - df_all["Mc_pct"].min()
+    x_range = df_all["D10"].max() - df_all["D10"].min()
+    # smaller vertical offset (closer to line)
+    y_offset = 0.06 * y_range if y_range > 0 else 1.0
+    # small horizontal offset to dodge labels left/right
+    x_offset = 0.03 * x_range if x_range > 0 else 0.2
+
+    for i, (_, row) in enumerate(stats.iterrows()):
+        x_line = row["D10"]
+        y_line_top = row["Mc_max"]
+        # alternate left/right offsets
+        direction = -1 if i % 2 == 0 else 1
+        x_lab = x_line + direction * x_offset
+        y_lab = y_line_top + y_offset
+
+        # thin connector line from cluster to label
+        ax.plot(
+            [x_line, x_lab],
+            [y_line_top, y_lab],
+            color="grey",
+            linewidth=0.8,
+            alpha=0.8,
+        )
+
+        ax.text(
+            x_lab,
+            y_lab,
+            f"{row['Span_mean']:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    ax.set_xlabel("D10 (\u00B5m)")
+    ax.set_ylabel("Measured FMC (%)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+def plot_empirical_span_diaphragm(
+    df: pd.DataFrame,
+    target_col: str = DEFAULT_TARGET_COL,
+    title: str = "FMC vs Span (D80/D20) for diaphragm on/off",
+    save_path: Optional[str] = None,
+):
+    required_cols = {"D80/D20", "D10", "Diaphragm_on", target_col}
+    if not required_cols.issubset(df.columns):
+        raise ValueError(f"DataFrame must contain: {required_cols}")
+
+    df0 = df[df["Diaphragm_on"] == 0].copy()
+    df1 = df[df["Diaphragm_on"] == 1].copy()
+
+    df0["Mc_pct"] = 100 * df0[target_col]
+    df1["Mc_pct"] = 100 * df1[target_col]
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    ax.scatter(df0["D80/D20"], df0["Mc_pct"], label="No diaphragm", alpha=0.8, edgecolors="k")
+    ax.scatter(df1["D80/D20"], df1["Mc_pct"], label="Diaphragm on", alpha=0.8, edgecolors="k")
+
+    # ---------- thick connection lines ----------
+    unique_span = sorted(df["D80/D20"].unique())
+    for s in unique_span:
+        g0 = df0[df0["D80/D20"] == s]["Mc_pct"]
+        g1 = df1[df1["D80/D20"] == s]["Mc_pct"]
+        if len(g0) > 0 and len(g1) > 0:
+            ax.plot(
+                [s, s],
+                [g0.mean(), g1.mean()],
+                color="grey",
+                linewidth=2.5,
+                alpha=0.8,
+            )
+
+    # ---------- cluster labels (D10) ----------
+    df_all = df.copy()
+    df_all["Mc_pct"] = 100 * df_all[target_col]
+
+    span_stats = (
+        df_all
+        .groupby("D80/D20")
+        .agg(
+            D10_mean=("D10", "mean"),
+            Mc_max=("Mc_pct", "max"),
+        )
+        .reset_index()
+    )
+
+    y_range = df_all["Mc_pct"].max() - df_all["Mc_pct"].min()
+    x_range = df_all["D80/D20"].max() - df_all["D80/D20"].min()
+    y_offset = 0.06 * y_range if y_range > 0 else 1.0
+    x_offset = 0.03 * x_range if x_range > 0 else 0.1
+
+    for i, (_, row) in enumerate(span_stats.iterrows()):
+        x_line = row["D80/D20"]
+        y_line_top = row["Mc_max"]
+        direction = -1 if i % 2 == 0 else 1
+        x_lab = x_line + direction * x_offset
+        y_lab = y_line_top + y_offset
+
+        # thin connector line
+        ax.plot(
+            [x_line, x_lab],
+            [y_line_top, y_lab],
+            color="grey",
+            linewidth=0.8,
+            alpha=0.8,
+        )
+
+        ax.text(
+            x_lab,
+            y_lab,
+            f"{row['D10_mean']:.1f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    ax.set_xlabel("Span (D80/D20)")
+    ax.set_ylabel("Measured FMC (%)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+def plot_empirical_delta_span_diaphragm(
+    df: pd.DataFrame,
+    target_col: str = DEFAULT_TARGET_COL,
+    n_points: int = 10,
+    save_path: Optional[str] = None,
+):
+    """
+    Empirical ?FMC(Span) curve using binned means of the raw data.
+
+    Steps:
+      - Bin Span (D80/D20) into n_points bins.
+      - For each bin, compute mean Mc% for diaphragm_on = 0 and 1.
+      - ?FMC(Span_bin) = mean(Mc%, dia=1) - mean(Mc%, dia=0).
+
+    No linear regression / best-fit lines are used.
+    """
+    if "D80/D20" not in df.columns or "Diaphragm_on" not in df.columns:
+        raise ValueError("Dataframe must contain 'D80/D20' and 'Diaphragm_on' columns.")
+
+    data = df[["D80/D20", "Diaphragm_on", target_col]].dropna().copy()
+    data["Mc_pct"] = 100 * data[target_col]
+
+    span_min = data["D80/D20"].min()
+    span_max = data["D80/D20"].max()
+    if span_min == span_max:
+        print("Span (D80/D20) has no variation; cannot build empirical delta curve.")
+        return
+
+    bins = np.linspace(span_min, span_max, n_points + 1)
+    data["Span_bin"] = pd.cut(data["D80/D20"], bins=bins, include_lowest=True)
+
+    grouped = (
+        data
+        .groupby(["Span_bin", "Diaphragm_on"])
+        .agg(
+            Span_mean=("D80/D20", "mean"),
+            Mc_mean=("Mc_pct", "mean"),
+        )
+        .reset_index()
+    )
+
+    pivot = grouped.pivot(
+        index="Span_bin",
+        columns="Diaphragm_on",
+        values=["Span_mean", "Mc_mean"],
+    )
+
+    required_cols = [("Span_mean", 0), ("Span_mean", 1), ("Mc_mean", 0), ("Mc_mean", 1)]
+    for col in required_cols:
+        if col not in pivot.columns:
+            print("Not enough overlapping Span bins with both diaphragm states to build empirical delta curve.")
+            return
+
+    pivot = pivot.dropna(subset=required_cols)
+    if pivot.empty:
+        print("No bins with both diaphragm_on=0 and 1; cannot build empirical delta curve.")
+        return
+
+    x_vals = 0.5 * (pivot[("Span_mean", 0)].to_numpy() + pivot[("Span_mean", 1)].to_numpy())
+    delta = pivot[("Mc_mean", 1)].to_numpy() - pivot[("Mc_mean", 0)].to_numpy()
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(x_vals, delta, marker="o", linewidth=2)
+
+    ax.axhline(0.0, linestyle="--", color="grey", linewidth=1)
+    ax.set_xlabel("Span (D80/D20)")
+    ax.set_ylabel("\u0394FMC (Dia - No Dia) (%)")
+    ax.set_title("Effect of diaphragm vs Span")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+def plot_empirical_delta_d10_diaphragm(
+    df: pd.DataFrame,
+    target_col: str = DEFAULT_TARGET_COL,
+    n_points: int = 10,
+    save_path: Optional[str] = None,
+):
+    """
+    Empirical ?FMC(D10) curve using binned means of the raw data.
+
+    Steps:
+      - Bin D10 into n_points bins.
+      - For each bin, compute mean Mc% for diaphragm_on = 0 and 1.
+      - ?FMC(D10_bin) = mean(Mc%, dia=1) - mean(Mc%, dia=0).
+
+    No linear regression / best-fit lines are used.
+    """
+    if "D10" not in df.columns or "Diaphragm_on" not in df.columns:
+        raise ValueError("Dataframe must contain 'D10' and 'Diaphragm_on' columns.")
+
+    # Work on a copy and convert Mc to %
+    data = df[["D10", "Diaphragm_on", target_col]].dropna().copy()
+    data["Mc_pct"] = 100 * data[target_col]
+
+    # Define D10 bins
+    d10_min = data["D10"].min()
+    d10_max = data["D10"].max()
+    if d10_min == d10_max:
+        print("D10 has no variation; cannot build empirical delta curve.")
+        return
+
+    # n_points = number of bins
+    bins = np.linspace(d10_min, d10_max, n_points + 1)
+    data["D10_bin"] = pd.cut(data["D10"], bins=bins, include_lowest=True)
+
+    # Compute mean D10 and Mc% in each bin & diaphragm state
+    grouped = (
+        data
+        .groupby(["D10_bin", "Diaphragm_on"])
+        .agg(
+            D10_mean=("D10", "mean"),
+            Mc_mean=("Mc_pct", "mean"),
+        )
+        .reset_index()
+    )
+
+    # Pivot to get columns for dia=0 and dia=1
+    pivot = grouped.pivot(
+        index="D10_bin",
+        columns="Diaphragm_on",
+        values=["D10_mean", "Mc_mean"],
+    )
+
+    # We only keep bins that have both dia=0 and dia=1
+    required_cols = [("D10_mean", 0), ("D10_mean", 1), ("Mc_mean", 0), ("Mc_mean", 1)]
+    for col in required_cols:
+        if col not in pivot.columns:
+            print("Not enough overlapping D10 bins with both diaphragm states to build empirical delta curve.")
+            return
+
+    pivot = pivot.dropna(subset=required_cols)
+
+    if pivot.empty:
+        print("No bins with both diaphragm_on=0 and 1; cannot build empirical delta curve.")
+        return
+
+    # x = average D10 in the bin (we can take mean of the two means)
+    x_vals = 0.5 * (pivot[("D10_mean", 0)].to_numpy() + pivot[("D10_mean", 1)].to_numpy())
+    # ?FMC = Mc(dia=1) - Mc(dia=0)
+    delta = pivot[("Mc_mean", 1)].to_numpy() - pivot[("Mc_mean", 0)].to_numpy()
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(x_vals, delta, marker="o", linewidth=2)
+
+    ax.axhline(0.0, linestyle="--", color="grey", linewidth=1)
+    ax.set_xlabel("D10 (\u00B5m)")
+    ax.set_ylabel("\u0394FMC (Dia - No Dia) (%)")
+    ax.set_title("Effect of diaphragm vs D10")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+def plot_delta_span_diaphragm(
+    pipe: Pipeline,
+    df: pd.DataFrame,
+    features: list[str],
+    n_points: int = 50,
+    save_path: Optional[str] = None,
+):
+    """
+    Plot ?FMC(Span) = FMC(diaphragm on) - FMC(no diaphragm) vs Span (D80/D20)
+    for the LASSO model.
+
+    D10 is held at its mean; Span (D80/D20) is varied and Span_Dia is updated.
+    """
+    required = {"D80/D20", "Diaphragm_on", "D10_Dia", "Span_Dia", "D10"}
+    if not required.issubset(set(features)):
+        raise ValueError(f"Features must include {required} for this plot.")
+
+    base_row = df[features].mean()
+    span_min = df["D80/D20"].min()
+    span_max = df["D80/D20"].max()
+    span_vals = np.linspace(span_min, span_max, n_points)
+
+    preds = {}
+    for dia in [0, 1]:
+        grid_df = pd.DataFrame([base_row] * n_points)
+        grid_df["D80/D20"] = span_vals
+        grid_df["Diaphragm_on"] = dia
+
+        # Interactions: Span_Dia uses Span, D10_Dia uses D10 (held at mean)
+        grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
+        grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
+
+        y_pred = 100 * pipe.predict(grid_df[features].to_numpy(dtype=float))
+        preds[dia] = y_pred
+
+    delta = preds[1] - preds[0]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(span_vals, delta, linewidth=2)
+
+    ax.axhline(0.0, linestyle="--", color="grey", linewidth=1)
+    ax.set_xlabel("Span (D80/D20)")
+    ax.set_ylabel("\u0394FMC (Dia - No Dia) (%)")
+    ax.set_title("Effect of diaphragm vs Span (Model)")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
@@ -648,7 +1066,7 @@ def main():
         X_all,
         y_all,
         sample_codes_all,
-        test_size=0.25,
+        test_size=0.20,
         random_state=2,
     )
 
@@ -661,14 +1079,14 @@ def main():
 
     # Internal validation metrics & graph (held-out DB_2)
     y_val_int_pred, r2_int, rmse_int = report_held_out_metrics(
-        pipe_lasso, X_val_int, y_val_int, "LASSO INTERNAL validation"
+        pipe_lasso, X_val_int, y_val_int, "Model validation"
     )
 
     plot_predicted_vs_actual(
         y_val_int,
         y_val_int_pred,
         sample_codes=codes_val_int,
-        title="LASSO - Internal validation (DB_2 hold-out)",
+        title="Model validation (20% hold-out)",
     )
 
     # 2D contour PDP using ALL DB_2 rows (for smoother surface)
@@ -677,19 +1095,48 @@ def main():
         pipe_lasso,
         df_features_train,
         DEFAULT_FEATURE_COLS,
-        title="LASSO - Predicted FMC as a function of D20 and D80/D20",
+        title="Model Predicted FMC as a function of D20 and D80/D20",
     )
 
-    # Diaphragm effect plots for LASSO (linear)
-    plot_pdp_d20_diaphragm(
+    # Diaphragm effect plots for LASSO (linear, model-based)
+    plot_pdp_d10_diaphragm(
         pipe_lasso,
         df_features_train,
         DEFAULT_FEATURE_COLS,
     )
-    plot_delta_d20_diaphragm(
+    plot_delta_d10_diaphragm(
         pipe_lasso,
         df_features_train,
         DEFAULT_FEATURE_COLS,
+    )
+    # Model-based diaphragm effect vs Span (D80/D20)
+    plot_delta_span_diaphragm(
+        pipe_lasso,
+        df_features_train,
+        DEFAULT_FEATURE_COLS,
+    )
+
+    # Empirical diaphragm plots using raw DB_2 data
+    plot_empirical_d10_diaphragm(
+        df_train_merged,
+        target_col=args.target_col,
+        title="FMC vs D10 for diaphragm on/off",
+    )
+
+    plot_empirical_span_diaphragm(
+        df_train_merged,
+        target_col=args.target_col,
+        title="FMC vs Span (D80/D20) for diaphragm on/off",
+    )
+
+    plot_empirical_delta_d10_diaphragm(
+        df_train_merged,
+        target_col=args.target_col,
+    )
+
+    plot_empirical_delta_span_diaphragm(
+        df_train_merged,
+        target_col=args.target_col,
     )
 
     # ---------- EXTERNAL VALIDATION DATA (DB) ----------
@@ -734,7 +1181,7 @@ def main():
         rf, X_val_ext, y_val_ext, "RF EXTERNAL validation (DB samples)"
     )
 
-    # Non-linear diaphragm effect vs D20 (Random Forest)
+    # Non-linear diaphragm effect vs D20 (Random Forest, model-based)
     plot_delta_dia_tree(
         rf,
         df_features_train,
@@ -752,13 +1199,14 @@ def main():
         gb, X_val_ext, y_val_ext, "GB EXTERNAL validation (DB samples)"
     )
 
-    # Non-linear diaphragm effect vs D20 (Gradient Boosting)
+    # Non-linear diaphragm effect vs D20 (Gradient Boosting, model-based)
     plot_delta_dia_tree(
         gb,
         df_features_train,
         DEFAULT_FEATURE_COLS,
         model_name="Gradient Boosting",
     )
+
 
 
 if __name__ == "__main__":
