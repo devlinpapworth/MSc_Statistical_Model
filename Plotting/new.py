@@ -1,14 +1,34 @@
 #!/usr/bin/env python3
-
-
+# -*- coding: utf-8 -*-
+from matplotlib.lines import Line2D
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from typing import Optional
 import argparse
 import textwrap
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+# Colour map for sample codes
+SAMPLE_COLOUR_MAP = {
+    # P10 = 5 um (blue tones)
+    "Si_5_2":  "#1f77b4",  # medium blue
+    "Si_5_5":  "#0b4f88",  # darker blue
 
-from typing import Optional
+    # P10 = 25 um (green tones)
+    "Si_25_2": "#2ca02c",  # medium green
+    "Si_25_5": "#1b6b1b",  # darker green
+
+    # P10 = 45 um (orange / warm tones)
+    "Si_45_2": "#ff7f0e",  # orange
+    "Si_45_5": "#b35400",  # burnt orange
+
+    # Other key samples
+    "Si_Rep_new": "#9467bd",  # purple
+    "Si_BM":      "#808080",  # grey
+}
+
+DEFAULT_OTHER_COLOUR = "#bbbbbb"  # for any sample not in the dict
+SAMPLE_CODE_COL = "Sample Code"   # adjust if your column name differs
 
 # ---------------------------------------------------------------------
 # Config
@@ -19,7 +39,6 @@ DB_SHEET = "DB_2"
 PSD_SHEET = "PSD"
 
 TARGET_COL = "Mc_%"
-SAMPLE_CODE_COL = "Sample Code"
 FLAG_COL = "flag"
 TEST_PROC_COL = "Test_procedure"
 
@@ -272,7 +291,7 @@ def plot_boxplot_d10_classes(
         return
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.boxplot(box_data, labels=box_labels, showfliers=True)
+    ax.boxplot(box_data, tick_labels=box_labels, showfliers=True)
     ax.set_ylabel("FMC (%)")
     ax.set_title(title)
     ax.grid(True, axis="y", alpha=0.3)
@@ -284,7 +303,7 @@ def plot_boxplot_d10_classes(
 
 
 # ---------------------------------------------------------------------
-# Plot 4: Scatter D10 vs Span coloured by FMC
+# Plot 4: Scatter D10 vs Span coloured by FMC (grouped)
 # ---------------------------------------------------------------------
 
 def plot_d10_span_scatter(
@@ -331,10 +350,10 @@ def plot_d10_span_scatter(
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
 
+
 # ---------------------------------------------------------------------
-# Plot 4b: Scatter D10 vs Span coloured by FMC – all points
+# Plot 4b: Scatter D10 vs Span coloured by FMC - all points & split
 # ---------------------------------------------------------------------
-import numpy as np
 
 def plot_allpoints_d10_vs_span(
     df: pd.DataFrame,
@@ -349,7 +368,6 @@ def plot_allpoints_d10_vs_span(
         - Colour = FMC (%)
         - Marker shape = diaphragm on/off
     """
-
     required = {"D10", "D80/D20", "Diaphragm_on", target_col}
     if not required.issubset(df.columns):
         raise ValueError(f"Dataframe must contain columns: {required}")
@@ -357,19 +375,14 @@ def plot_allpoints_d10_vs_span(
     df_plot = df.copy()
     df_plot["Mc_pct"] = 100 * df_plot[target_col]
 
-    # -------------------------
-    # Add small jitter so that
-    # repeated measurements (same D10/span) become visible
-    # -------------------------
-    jitter_scale_x = 0.15     # microns of jitter for D10
-    jitter_scale_y = 0.05     # jitter for Span
+    jitter_scale_x = 0.15
+    jitter_scale_y = 0.05
 
     df_plot["D10_j"] = df_plot["D10"] + np.random.normal(0, jitter_scale_x, len(df_plot))
     df_plot["Span_j"] = df_plot["D80/D20"] + np.random.normal(0, jitter_scale_y, len(df_plot))
 
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    # --- diaphragm OFF ---
     df0 = df_plot[df_plot["Diaphragm_on"] == 0]
     sc0 = ax.scatter(
         df0["D10_j"],
@@ -382,7 +395,6 @@ def plot_allpoints_d10_vs_span(
         label="No diaphragm",
     )
 
-    # --- diaphragm ON ---
     df1 = df_plot[df_plot["Diaphragm_on"] == 1]
     sc1 = ax.scatter(
         df1["D10_j"],
@@ -395,7 +407,6 @@ def plot_allpoints_d10_vs_span(
         label="Diaphragm on",
     )
 
-    # colourbar
     cbar = plt.colorbar(sc1, ax=ax)
     cbar.set_label("FMC (%)")
 
@@ -413,7 +424,6 @@ def plot_allpoints_d10_vs_span(
     plt.show()
 
 
-
 def plot_allpoints_d10_vs_span_separated(
     df: pd.DataFrame,
     target_col: str = TARGET_COL,
@@ -424,13 +434,7 @@ def plot_allpoints_d10_vs_span_separated(
     Creates TWO separate scatter plots:
         1) Only diaphragm OFF
         2) Only diaphragm ON
-    Each point represents one experimental row.
-
-    - X = D10 (with jitter)
-    - Y = Span (D80/D20) (with jitter)
-    - Colour = FMC (%)
     """
-
     required = {"D10", "D80/D20", "Diaphragm_on", target_col}
     if not required.issubset(df.columns):
         raise ValueError(f"DataFrame must contain columns: {required}")
@@ -438,23 +442,18 @@ def plot_allpoints_d10_vs_span_separated(
     df_plot = df.copy()
     df_plot["Mc_pct"] = 100 * df_plot[target_col]
 
-    # --- Jitter so duplicates don't overlap ---
     jitter_x = 0.15
     jitter_y = 0.05
     df_plot["D10_j"] = df_plot["D10"] + np.random.normal(0, jitter_x, len(df_plot))
     df_plot["Span_j"] = df_plot["D80/D20"] + np.random.normal(0, jitter_y, len(df_plot))
 
-    # --- Split ---
-    df0 = df_plot[df_plot["Diaphragm_on"] == 0]   # Off
-    df1 = df_plot[df_plot["Diaphragm_on"] == 1]   # On
+    df0 = df_plot[df_plot["Diaphragm_on"] == 0]
+    df1 = df_plot[df_plot["Diaphragm_on"] == 1]
 
-    # Same axis limits for visual comparison
     d10_min, d10_max = df_plot["D10"].min(), df_plot["D10"].max()
     span_min, span_max = df_plot["D80/D20"].min(), df_plot["D80/D20"].max()
 
-    # -----------------------------
-    # FIGURE 1 — NO DIAPHRAGM
-    # -----------------------------
+    # Figure 1 — No diaphragm
     fig0, ax0 = plt.subplots(figsize=(7, 5))
     sc0 = ax0.scatter(
         df0["D10_j"],
@@ -481,9 +480,7 @@ def plot_allpoints_d10_vs_span_separated(
 
     plt.show()
 
-    # -----------------------------
-    # FIGURE 2 — DIAPHRAGM ON
-    # -----------------------------
+    # Figure 2 — Diaphragm on
     fig1, ax1 = plt.subplots(figsize=(7, 5))
     sc1 = ax1.scatter(
         df1["D10_j"],
@@ -509,6 +506,291 @@ def plot_allpoints_d10_vs_span_separated(
         fig1.savefig(save_path_base + "_diaphragm_on.png", dpi=300, bbox_inches="tight")
 
     plt.show()
+
+
+# ---------------------------------------------------------------------
+# Pumping time vs D10 / Span (coloured by Sample Code)
+# ---------------------------------------------------------------------
+def _get_numeric_1d(col):
+    """
+    Ensure we always end up with a 1D numeric Series,
+    even if 'col' is actually a DataFrame with duplicate names.
+    """
+    if isinstance(col, pd.DataFrame):
+        # take the first physical column if there are duplicates
+        ser = col.iloc[:, 0]
+    else:
+        ser = col
+    return pd.to_numeric(ser, errors="coerce")
+
+def plot_FT_vs_D10(df: pd.DataFrame,
+                   title: str = "Pumping time vs D10",
+                   save_path: Optional[str] = None):
+    """
+    Pumping time F_T vs D10.
+    Colour by sample code, quadratic trend line.
+    """
+    required = {"D10", "F_T", SAMPLE_CODE_COL}
+    if not required.issubset(df.columns):
+        raise ValueError(f"DataFrame must contain: {required}")
+
+    df_plot = df[list(required)].copy()
+
+    # 1D numeric columns
+    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
+    df_plot["F_T"] = _get_numeric_1d(df_plot["F_T"])
+
+    df_plot = df_plot.dropna(subset=["D10", "F_T"])
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    colours = df_plot[SAMPLE_CODE_COL].map(SAMPLE_COLOUR_MAP).fillna(DEFAULT_OTHER_COLOUR)
+
+    ax.scatter(
+        df_plot["D10"].to_numpy(),
+        df_plot["F_T"].to_numpy(),
+        marker="o",
+        edgecolors="k",
+        alpha=0.85,
+        s=70,
+        c=list(colours),
+    )
+
+    # quadratic trend
+    x = df_plot["D10"].to_numpy(dtype=float)
+    y = df_plot["F_T"].to_numpy(dtype=float)
+    if len(x) >= 3:
+        coeffs = np.polyfit(x, y, deg=2)
+        x_fit = np.linspace(x.min(), x.max(), 200)
+        y_fit = np.polyval(coeffs, x_fit)
+        ax.plot(x_fit, y_fit, color="black", linewidth=2,
+                linestyle="--", label="Trend (quadratic)")
+
+    ax.set_xlabel("D10 (um)")
+    ax.set_ylabel("Pumping time, F_T (s)")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+
+    # legend
+    legend_handles = []
+    for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        legend_handles.append(
+            Line2D([0], [0], marker="o", color="none",
+                   markerfacecolor=colour, markeredgecolor="k",
+                   markersize=7, label=code)
+        )
+    if len(x) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle="--",
+                   label="Trend (quadratic)")
+        )
+
+    ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
+              loc="upper left", borderaxespad=0.)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+
+def plot_FT_vs_Span(df: pd.DataFrame,
+                    title: str = "Pumping time vs Span",
+                    save_path: Optional[str] = None):
+    """
+    Pumping time F_T vs Span (D80/D20).
+    Colour by sample code, quadratic trend line.
+    """
+    required = {"D80/D20", "F_T", SAMPLE_CODE_COL}
+    if not required.issubset(df.columns):
+        raise ValueError(f"DataFrame must contain: {required}")
+
+    df_plot = df[list(required)].copy()
+
+    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
+    df_plot["F_T"] = _get_numeric_1d(df_plot["F_T"])
+
+    df_plot = df_plot.dropna(subset=["D80/D20", "F_T"])
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    colours = df_plot[SAMPLE_CODE_COL].map(SAMPLE_COLOUR_MAP).fillna(DEFAULT_OTHER_COLOUR)
+
+    ax.scatter(
+        df_plot["D80/D20"].to_numpy(),
+        df_plot["F_T"].to_numpy(),
+        marker="o",
+        edgecolors="k",
+        alpha=0.85,
+        s=70,
+        c=list(colours),
+    )
+
+    x = df_plot["D80/D20"].to_numpy(dtype=float)
+    y = df_plot["F_T"].to_numpy(dtype=float)
+    if len(x) >= 3:
+        coeffs = np.polyfit(x, y, deg=2)
+        x_fit = np.linspace(x.min(), x.max(), 200)
+        y_fit = np.polyval(coeffs, x_fit)
+        ax.plot(x_fit, y_fit, color="black", linewidth=2,
+                linestyle="--", label="Trend (quadratic)")
+
+    ax.set_xlabel("Span (D80/D20)")
+    ax.set_ylabel("Pumping time, F_T (s)")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+
+    legend_handles = []
+    for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        legend_handles.append(
+            Line2D([0], [0], marker="o", color="none",
+                   markerfacecolor=colour, markeredgecolor="k",
+                   markersize=7, label=code)
+        )
+    if len(x) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle="--",
+                   label="Trend (quadratic)")
+        )
+
+    ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
+              loc="upper left", borderaxespad=0.)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+
+def plot_AT_vs_D10(df: pd.DataFrame,
+                   title: str = "Air-blow time (A_T) vs D10",
+                   save_path: Optional[str] = None):
+    required = {"D10", "A_T", SAMPLE_CODE_COL}
+    if not required.issubset(df.columns):
+        raise ValueError(f"DataFrame must contain: {required}")
+
+    df_plot = df[list(required)].copy()
+
+    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
+    df_plot["A_T"] = _get_numeric_1d(df_plot["A_T"])
+    df_plot = df_plot.dropna(subset=["D10", "A_T"])
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    colours = df_plot[SAMPLE_CODE_COL].map(SAMPLE_COLOUR_MAP).fillna(DEFAULT_OTHER_COLOUR)
+
+    ax.scatter(
+        df_plot["D10"].to_numpy(),
+        df_plot["A_T"].to_numpy(),
+        marker="o",
+        edgecolors="k",
+        alpha=0.85,
+        s=70,
+        c=list(colours),
+    )
+
+    x = df_plot["D10"].to_numpy(dtype=float)
+    y = df_plot["A_T"].to_numpy(dtype=float)
+    if len(x) >= 3:
+        coeffs = np.polyfit(x, y, deg=2)
+        x_fit = np.linspace(x.min(), x.max(), 200)
+        y_fit = np.polyval(coeffs, x_fit)
+        ax.plot(x_fit, y_fit, color="black", linewidth=2,
+                linestyle="--", label="Trend (quadratic)")
+
+    ax.set_xlabel("D10 (um)")
+    ax.set_ylabel("Air-blow time, A_T (s)")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+
+    legend_handles = []
+    for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        legend_handles.append(
+            Line2D([0], [0], marker="o", color="none",
+                   markerfacecolor=colour, markeredgecolor="k",
+                   markersize=7, label=code)
+        )
+    if len(x) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle="--",
+                   label="Trend (quadratic)")
+        )
+
+    ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
+              loc="upper left", borderaxespad=0.)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+
+def plot_AT_vs_Span(df: pd.DataFrame,
+                    title: str = "Air-blow time (A_T) vs Span",
+                    save_path: Optional[str] = None):
+    required = {"D80/D20", "A_T", SAMPLE_CODE_COL}
+    if not required.issubset(df.columns):
+        raise ValueError(f"DataFrame must contain: {required}")
+
+    df_plot = df[list(required)].copy()
+
+    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
+    df_plot["A_T"] = _get_numeric_1d(df_plot["A_T"])
+    df_plot = df_plot.dropna(subset=["D80/D20", "A_T"])
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    colours = df_plot[SAMPLE_CODE_COL].map(SAMPLE_COLOUR_MAP).fillna(DEFAULT_OTHER_COLOUR)
+
+    ax.scatter(
+        df_plot["D80/D20"].to_numpy(),
+        df_plot["A_T"].to_numpy(),
+        marker="o",
+        edgecolors="k",
+        alpha=0.85,
+        s=70,
+        c=list(colours),
+    )
+
+    x = df_plot["D80/D20"].to_numpy(dtype=float)
+    y = df_plot["A_T"].to_numpy(dtype=float)
+    if len(x) >= 3:
+        coeffs = np.polyfit(x, y, deg=2)
+        x_fit = np.linspace(x.min(), x.max(), 200)
+        y_fit = np.polyval(coeffs, x_fit)
+        ax.plot(x_fit, y_fit, color="black", linewidth=2,
+                linestyle="--", label="Trend (quadratic)")
+
+    ax.set_xlabel("Span (D80/D20)")
+    ax.set_ylabel("Air-blow time, A_T (s)")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+
+    legend_handles = []
+    for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        legend_handles.append(
+            Line2D([0], [0], marker="o", color="none",
+                   markerfacecolor=colour, markeredgecolor="k",
+                   markersize=7, label=code)
+        )
+    if len(x) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle="--",
+                   label="Trend (quadratic)")
+        )
+
+    ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
+              loc="upper left", borderaxespad=0.)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
 
 
 # ---------------------------------------------------------------------
@@ -554,17 +836,20 @@ def main():
     plot_allpoints_d10_vs_span(
         df,
         target_col=TARGET_COL,
-        title="D10 vs Span coloured by FMC (all data)",
-        save_path=None,  # or r"C:\path\to\save\d10_span_allpoints.png"
+        title="D10 vs Span coloured by FMC",
+        save_path=None,
     )
     plot_allpoints_d10_vs_span_separated(
         df,
         target_col=TARGET_COL,
         title_base="D10 vs Span coloured by FMC",
-        save_path_base=None,   # Or provide base filename
-)
+        save_path_base=None,
+    )
+    plot_FT_vs_D10(df)
+    plot_FT_vs_Span(df)
+    plot_AT_vs_D10(df)
+    plot_AT_vs_Span(df)
 
 
 if __name__ == "__main__":
     main()
-
