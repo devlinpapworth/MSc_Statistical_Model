@@ -564,10 +564,10 @@ def plot_FT_vs_D10(df: pd.DataFrame,
         x_fit = np.linspace(x.min(), x.max(), 200)
         y_fit = np.polyval(coeffs, x_fit)
         ax.plot(x_fit, y_fit, color="black", linewidth=2,
-                linestyle="--", label="Trend (quadratic)")
+                linestyle="--", label="Trend")
 
-    ax.set_xlabel("D10 (um)")
-    ax.set_ylabel("Pumping time, F_T (s)")
+    ax.set_xlabel("D10 (\u00B5m)")
+    ax.set_ylabel("Pumping time (s)")
     ax.set_title(title)
     ax.grid(alpha=0.3)
 
@@ -583,7 +583,7 @@ def plot_FT_vs_D10(df: pd.DataFrame,
     if len(x) >= 3:
         legend_handles.append(
             Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend (quadratic)")
+                   label="Trend")
         )
 
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
@@ -634,10 +634,10 @@ def plot_FT_vs_Span(df: pd.DataFrame,
         x_fit = np.linspace(x.min(), x.max(), 200)
         y_fit = np.polyval(coeffs, x_fit)
         ax.plot(x_fit, y_fit, color="black", linewidth=2,
-                linestyle="--", label="Trend (quadratic)")
+                linestyle="--", label="Trend")
 
     ax.set_xlabel("Span (D80/D20)")
-    ax.set_ylabel("Pumping time, F_T (s)")
+    ax.set_ylabel("Pumping time (s)")
     ax.set_title(title)
     ax.grid(alpha=0.3)
 
@@ -652,7 +652,7 @@ def plot_FT_vs_Span(df: pd.DataFrame,
     if len(x) >= 3:
         legend_handles.append(
             Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend (quadratic)")
+                   label="Trend")
         )
 
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
@@ -665,7 +665,7 @@ def plot_FT_vs_Span(df: pd.DataFrame,
 
 
 def plot_AT_vs_D10(df: pd.DataFrame,
-                   title: str = "Air-blow time (A_T) vs D10",
+                   title: str = "Air-blow time vs D10",
                    save_path: Optional[str] = None):
     required = {"D10", "A_T", SAMPLE_CODE_COL}
     if not required.issubset(df.columns):
@@ -698,10 +698,10 @@ def plot_AT_vs_D10(df: pd.DataFrame,
         x_fit = np.linspace(x.min(), x.max(), 200)
         y_fit = np.polyval(coeffs, x_fit)
         ax.plot(x_fit, y_fit, color="black", linewidth=2,
-                linestyle="--", label="Trend (quadratic)")
+                linestyle="--", label="Trend")
 
-    ax.set_xlabel("D10 (um)")
-    ax.set_ylabel("Air-blow time, A_T (s)")
+    ax.set_xlabel("D10 (\u00B5m)")
+    ax.set_ylabel("Air-blow time (s)")
     ax.set_title(title)
     ax.grid(alpha=0.3)
 
@@ -716,7 +716,7 @@ def plot_AT_vs_D10(df: pd.DataFrame,
     if len(x) >= 3:
         legend_handles.append(
             Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend (quadratic)")
+                   label="Trend")
         )
 
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
@@ -729,7 +729,7 @@ def plot_AT_vs_D10(df: pd.DataFrame,
 
 
 def plot_AT_vs_Span(df: pd.DataFrame,
-                    title: str = "Air-blow time (A_T) vs Span",
+                    title: str = "Air-blow time vs Span",
                     save_path: Optional[str] = None):
     required = {"D80/D20", "A_T", SAMPLE_CODE_COL}
     if not required.issubset(df.columns):
@@ -762,10 +762,10 @@ def plot_AT_vs_Span(df: pd.DataFrame,
         x_fit = np.linspace(x.min(), x.max(), 200)
         y_fit = np.polyval(coeffs, x_fit)
         ax.plot(x_fit, y_fit, color="black", linewidth=2,
-                linestyle="--", label="Trend (quadratic)")
+                linestyle="--", label="Trend")
 
     ax.set_xlabel("Span (D80/D20)")
-    ax.set_ylabel("Air-blow time, A_T (s)")
+    ax.set_ylabel("Air-blow time (s)")
     ax.set_title(title)
     ax.grid(alpha=0.3)
 
@@ -780,7 +780,7 @@ def plot_AT_vs_Span(df: pd.DataFrame,
     if len(x) >= 3:
         legend_handles.append(
             Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend (quadratic)")
+                   label="Trend")
         )
 
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
