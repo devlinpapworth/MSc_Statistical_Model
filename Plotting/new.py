@@ -523,14 +523,16 @@ def _get_numeric_1d(col):
         ser = col
     return pd.to_numeric(ser, errors="coerce")
 
+
 def plot_FT_vs_D10(df: pd.DataFrame,
                    title: str = "Pumping time vs D10",
                    save_path: Optional[str] = None):
     """
     Pumping time F_T vs D10.
     Colour by sample code, quadratic trend line.
+    Legend labels = Span (D80/D20) for each sample.
     """
-    required = {"D10", "F_T", SAMPLE_CODE_COL}
+    required = {"D10", "D80/D20", "F_T", SAMPLE_CODE_COL}
     if not required.issubset(df.columns):
         raise ValueError(f"DataFrame must contain: {required}")
 
@@ -538,9 +540,10 @@ def plot_FT_vs_D10(df: pd.DataFrame,
 
     # 1D numeric columns
     df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
+    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
     df_plot["F_T"] = _get_numeric_1d(df_plot["F_T"])
 
-    df_plot = df_plot.dropna(subset=["D10", "F_T"])
+    df_plot = df_plot.dropna(subset=["D10", "F_T", "D80/D20"])
 
     fig, ax = plt.subplots(figsize=(7, 4))
 
@@ -571,14 +574,26 @@ def plot_FT_vs_D10(df: pd.DataFrame,
     ax.set_title(title)
     ax.grid(alpha=0.3)
 
-    # legend
+    # force axes to start at zero
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    # legend: label by Span (mean D80/D20 per sample)
+    span_by_code = (
+        df_plot
+        .groupby(SAMPLE_CODE_COL)["D80/D20"]
+        .mean()
+    )
+
     legend_handles = []
     for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
         colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        span_val = span_by_code.loc[code]
+        label = f"Span={span_val:.2f}"
         legend_handles.append(
             Line2D([0], [0], marker="o", color="none",
                    markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=code)
+                   markersize=7, label=label)
         )
     if len(x) >= 3:
         legend_handles.append(
@@ -601,17 +616,19 @@ def plot_FT_vs_Span(df: pd.DataFrame,
     """
     Pumping time F_T vs Span (D80/D20).
     Colour by sample code, quadratic trend line.
+    Legend labels = D10 for each sample.
     """
-    required = {"D80/D20", "F_T", SAMPLE_CODE_COL}
+    required = {"D80/D20", "D10", "F_T", SAMPLE_CODE_COL}
     if not required.issubset(df.columns):
         raise ValueError(f"DataFrame must contain: {required}")
 
     df_plot = df[list(required)].copy()
 
     df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
+    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
     df_plot["F_T"] = _get_numeric_1d(df_plot["F_T"])
 
-    df_plot = df_plot.dropna(subset=["D80/D20", "F_T"])
+    df_plot = df_plot.dropna(subset=["D80/D20", "F_T", "D10"])
 
     fig, ax = plt.subplots(figsize=(7, 4))
 
@@ -641,13 +658,26 @@ def plot_FT_vs_Span(df: pd.DataFrame,
     ax.set_title(title)
     ax.grid(alpha=0.3)
 
+    # force axes to start at zero
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    # legend: label by D10 (mean per sample)
+    d10_by_code = (
+        df_plot
+        .groupby(SAMPLE_CODE_COL)["D10"]
+        .mean()
+    )
+
     legend_handles = []
     for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
         colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        d10_val = d10_by_code.loc[code]
+        label = f"D10={d10_val:.1f} \u00B5m"
         legend_handles.append(
             Line2D([0], [0], marker="o", color="none",
                    markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=code)
+                   markersize=7, label=label)
         )
     if len(x) >= 3:
         legend_handles.append(
@@ -667,32 +697,70 @@ def plot_FT_vs_Span(df: pd.DataFrame,
 def plot_AT_vs_D10(df: pd.DataFrame,
                    title: str = "Air-blow time vs D10",
                    save_path: Optional[str] = None):
-    required = {"D10", "A_T", SAMPLE_CODE_COL}
+    """
+    Air-blow time vs D10.
+    Uses mean D10 / A_T per sample & diaphragm state.
+    Legend labels = Span (D80/D20) per sample.
+    """
+    required = {"D10", "D80/D20", "A_T", SAMPLE_CODE_COL, "Diaphragm_on"}
     if not required.issubset(df.columns):
         raise ValueError(f"DataFrame must contain: {required}")
 
     df_plot = df[list(required)].copy()
 
+    # numeric columns
     df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
+    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
     df_plot["A_T"] = _get_numeric_1d(df_plot["A_T"])
-    df_plot = df_plot.dropna(subset=["D10", "A_T"])
+    df_plot = df_plot.dropna(subset=["D10", "A_T", "D80/D20"])
+
+    # ----- diaphragm effect per sample (mean dia on/off) -----
+    stats = (
+        df_plot
+        .groupby([SAMPLE_CODE_COL, "Diaphragm_on"])
+        .agg(D10_mean=("D10", "mean"),
+             Span_mean=("D80/D20", "mean"),
+             AT_mean=("A_T", "mean"))
+        .reset_index()
+    )
 
     fig, ax = plt.subplots(figsize=(7, 4))
 
-    colours = df_plot[SAMPLE_CODE_COL].map(SAMPLE_COLOUR_MAP).fillna(DEFAULT_OTHER_COLOUR)
+    # scatter means only
+    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
+        sub = stats[stats[SAMPLE_CODE_COL] == code]
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
 
-    ax.scatter(
-        df_plot["D10"].to_numpy(),
-        df_plot["A_T"].to_numpy(),
-        marker="o",
-        edgecolors="k",
-        alpha=0.85,
-        s=70,
-        c=list(colours),
-    )
+        for _, row in sub.iterrows():
+            ax.scatter(
+                row["D10_mean"],
+                row["AT_mean"],
+                marker="o",
+                edgecolors="k",
+                alpha=0.9,
+                s=70,
+                c=[colour],
+            )
 
-    x = df_plot["D10"].to_numpy(dtype=float)
-    y = df_plot["A_T"].to_numpy(dtype=float)
+        # vertical connector line (dia effect) if both states exist
+        if {0, 1}.issubset(set(sub["Diaphragm_on"])):
+            d10_mean = sub["D10_mean"].mean()
+            y0 = sub.loc[sub["Diaphragm_on"] == 0, "AT_mean"].iloc[0]
+            y1 = sub.loc[sub["Diaphragm_on"] == 1, "AT_mean"].iloc[0]
+
+            ax.plot(
+                [d10_mean, d10_mean],
+                [y0, y1],
+                color="grey",
+                linewidth=2,
+                alpha=0.8,
+            )
+
+            print(f"{code}: ?Time (dia - no dia) = {y1 - y0:.2f} s")
+
+    # ----- trend line (quadratic, based on means) -----
+    x = stats["D10_mean"].to_numpy(dtype=float)
+    y = stats["AT_mean"].to_numpy(dtype=float)
     if len(x) >= 3:
         coeffs = np.polyfit(x, y, deg=2)
         x_fit = np.linspace(x.min(), x.max(), 200)
@@ -705,13 +773,26 @@ def plot_AT_vs_D10(df: pd.DataFrame,
     ax.set_title(title)
     ax.grid(alpha=0.3)
 
+    # force axes to start at zero
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    # legend: label by Span (mean Span per sample)
+    span_by_code = (
+        stats
+        .groupby(SAMPLE_CODE_COL)["Span_mean"]
+        .mean()
+    )
+
     legend_handles = []
-    for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
+    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
         colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        span_val = span_by_code.loc[code]
+        label = f"Span={span_val:.2f}"
         legend_handles.append(
             Line2D([0], [0], marker="o", color="none",
                    markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=code)
+                   markersize=7, label=label)
         )
     if len(x) >= 3:
         legend_handles.append(
@@ -719,7 +800,8 @@ def plot_AT_vs_D10(df: pd.DataFrame,
                    label="Trend")
         )
 
-    ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
+    ax.legend(handles=legend_handles,
+              bbox_to_anchor=(1.02, 1),
               loc="upper left", borderaxespad=0.)
 
     plt.tight_layout()
@@ -731,32 +813,69 @@ def plot_AT_vs_D10(df: pd.DataFrame,
 def plot_AT_vs_Span(df: pd.DataFrame,
                     title: str = "Air-blow time vs Span",
                     save_path: Optional[str] = None):
-    required = {"D80/D20", "A_T", SAMPLE_CODE_COL}
+    """
+    Air-blow time vs Span (D80/D20).
+    Uses mean Span / A_T per sample & diaphragm state.
+    Legend labels = D10 per sample.
+    """
+    required = {"D80/D20", "D10", "A_T", SAMPLE_CODE_COL, "Diaphragm_on"}
     if not required.issubset(df.columns):
         raise ValueError(f"DataFrame must contain: {required}")
 
     df_plot = df[list(required)].copy()
 
     df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
+    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
     df_plot["A_T"] = _get_numeric_1d(df_plot["A_T"])
-    df_plot = df_plot.dropna(subset=["D80/D20", "A_T"])
+    df_plot = df_plot.dropna(subset=["D80/D20", "A_T", "D10"])
+
+    # ----- diaphragm effect per sample (mean dia on/off) -----
+    stats = (
+        df_plot
+        .groupby([SAMPLE_CODE_COL, "Diaphragm_on"])
+        .agg(Span_mean=("D80/D20", "mean"),
+             D10_mean=("D10", "mean"),
+             AT_mean=("A_T", "mean"))
+        .reset_index()
+    )
 
     fig, ax = plt.subplots(figsize=(7, 4))
 
-    colours = df_plot[SAMPLE_CODE_COL].map(SAMPLE_COLOUR_MAP).fillna(DEFAULT_OTHER_COLOUR)
+    # scatter means only
+    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
+        sub = stats[stats[SAMPLE_CODE_COL] == code]
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
 
-    ax.scatter(
-        df_plot["D80/D20"].to_numpy(),
-        df_plot["A_T"].to_numpy(),
-        marker="o",
-        edgecolors="k",
-        alpha=0.85,
-        s=70,
-        c=list(colours),
-    )
+        for _, row in sub.iterrows():
+            ax.scatter(
+                row["Span_mean"],
+                row["AT_mean"],
+                marker="o",
+                edgecolors="k",
+                alpha=0.9,
+                s=70,
+                c=[colour],
+            )
 
-    x = df_plot["D80/D20"].to_numpy(dtype=float)
-    y = df_plot["A_T"].to_numpy(dtype=float)
+        # vertical connector line (dia effect) if both states exist
+        if {0, 1}.issubset(set(sub["Diaphragm_on"])):
+            span_mean = sub["Span_mean"].mean()
+            y0 = sub.loc[sub["Diaphragm_on"] == 0, "AT_mean"].iloc[0]
+            y1 = sub.loc[sub["Diaphragm_on"] == 1, "AT_mean"].iloc[0]
+
+            ax.plot(
+                [span_mean, span_mean],
+                [y0, y1],
+                color="grey",
+                linewidth=2,
+                alpha=0.8,
+            )
+
+            print(f"{code}: ?Time (dia - no dia) = {y1 - y0:.2f} s")
+
+    # ----- trend line (quadratic, based on means) -----
+    x = stats["Span_mean"].to_numpy(dtype=float)
+    y = stats["AT_mean"].to_numpy(dtype=float)
     if len(x) >= 3:
         coeffs = np.polyfit(x, y, deg=2)
         x_fit = np.linspace(x.min(), x.max(), 200)
@@ -769,13 +888,26 @@ def plot_AT_vs_Span(df: pd.DataFrame,
     ax.set_title(title)
     ax.grid(alpha=0.3)
 
+    # force axes to start at zero
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    # legend: label by D10 (mean per sample)
+    d10_by_code = (
+        stats
+        .groupby(SAMPLE_CODE_COL)["D10_mean"]
+        .mean()
+    )
+
     legend_handles = []
-    for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
+    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
         colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        d10_val = d10_by_code.loc[code]
+        label = f"D10={d10_val:.1f} \u00B5m"
         legend_handles.append(
             Line2D([0], [0], marker="o", color="none",
                    markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=code)
+                   markersize=7, label=label)
         )
     if len(x) >= 3:
         legend_handles.append(
@@ -783,7 +915,8 @@ def plot_AT_vs_Span(df: pd.DataFrame,
                    label="Trend")
         )
 
-    ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
+    ax.legend(handles=legend_handles,
+              bbox_to_anchor=(1.02, 1),
               loc="upper left", borderaxespad=0.)
 
     plt.tight_layout()
