@@ -701,6 +701,10 @@ def plot_AT_vs_D10(df: pd.DataFrame,
     Air-blow time vs D10.
     Uses mean D10 / A_T per sample & diaphragm state.
     Legend labels = Span (D80/D20) per sample.
+    Marker shape encodes diaphragm state:
+        circle = diaphragm on (1)
+        triangle = diaphragm off (0)
+    Separate quadratic trends for dia on/off.
     """
     required = {"D10", "D80/D20", "A_T", SAMPLE_CODE_COL, "Diaphragm_on"}
     if not required.issubset(df.columns):
@@ -726,16 +730,17 @@ def plot_AT_vs_D10(df: pd.DataFrame,
 
     fig, ax = plt.subplots(figsize=(7, 4))
 
-    # scatter means only
+    # scatter means only, marker by diaphragm state
     for code in sorted(stats[SAMPLE_CODE_COL].unique()):
         sub = stats[stats[SAMPLE_CODE_COL] == code]
         colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
 
         for _, row in sub.iterrows():
+            marker = "o" if row["Diaphragm_on"] == 1 else "^"
             ax.scatter(
                 row["D10_mean"],
                 row["AT_mean"],
-                marker="o",
+                marker=marker,
                 edgecolors="k",
                 alpha=0.9,
                 s=70,
@@ -758,15 +763,31 @@ def plot_AT_vs_D10(df: pd.DataFrame,
 
             print(f"{code}: ?Time (dia - no dia) = {y1 - y0:.2f} s")
 
-    # ----- trend line (quadratic, based on means) -----
-    x = stats["D10_mean"].to_numpy(dtype=float)
-    y = stats["AT_mean"].to_numpy(dtype=float)
-    if len(x) >= 3:
-        coeffs = np.polyfit(x, y, deg=2)
-        x_fit = np.linspace(x.min(), x.max(), 200)
-        y_fit = np.polyval(coeffs, x_fit)
-        ax.plot(x_fit, y_fit, color="black", linewidth=2,
-                linestyle="--", label="Trend")
+    # ----- trend lines (quadratic, based on means for each dia state) -----
+    stats_on = stats[stats["Diaphragm_on"] == 1]
+    stats_off = stats[stats["Diaphragm_on"] == 0]
+
+    # dia ON
+    if len(stats_on) >= 3:
+        x_on = stats_on["D10_mean"].to_numpy(dtype=float)
+        y_on = stats_on["AT_mean"].to_numpy(dtype=float)
+        coeffs_on = np.polyfit(x_on, y_on, deg=2)
+        x_fit_on = np.linspace(x_on.min(), x_on.max(), 200)
+        y_fit_on = np.polyval(coeffs_on, x_fit_on)
+        ax.plot(x_fit_on, y_fit_on,
+                color="black", linewidth=2, linestyle="--",
+                label="Trend (Dia on)")
+
+    # dia OFF
+    if len(stats_off) >= 3:
+        x_off = stats_off["D10_mean"].to_numpy(dtype=float)
+        y_off = stats_off["AT_mean"].to_numpy(dtype=float)
+        coeffs_off = np.polyfit(x_off, y_off, deg=2)
+        x_fit_off = np.linspace(x_off.min(), x_off.max(), 200)
+        y_fit_off = np.polyval(coeffs_off, x_fit_off)
+        ax.plot(x_fit_off, y_fit_off,
+                color="black", linewidth=2, linestyle=":",
+                label="Trend (Dia off)")
 
     ax.set_xlabel("D10 (\u00B5m)")
     ax.set_ylabel("Air-blow time (s)")
@@ -794,10 +815,26 @@ def plot_AT_vs_D10(df: pd.DataFrame,
                    markerfacecolor=colour, markeredgecolor="k",
                    markersize=7, label=label)
         )
-    if len(x) >= 3:
+
+    # marker-shape legend for diaphragm state
+    dia_on_handle = Line2D([0], [0], marker="o", color="none",
+                           markerfacecolor="lightgrey", markeredgecolor="k",
+                           markersize=7, label="Dia on")
+    dia_off_handle = Line2D([0], [0], marker="^", color="none",
+                            markerfacecolor="lightgrey", markeredgecolor="k",
+                            markersize=7, label="Dia off")
+    legend_handles.extend([dia_on_handle, dia_off_handle])
+
+    # trend line legend (only if present)
+    if len(stats_on) >= 3:
         legend_handles.append(
             Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend")
+                   label="Trend (Dia on)")
+        )
+    if len(stats_off) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle=":",
+                   label="Trend (Dia off)")
         )
 
     ax.legend(handles=legend_handles,
@@ -810,6 +847,7 @@ def plot_AT_vs_D10(df: pd.DataFrame,
     plt.show()
 
 
+
 def plot_AT_vs_Span(df: pd.DataFrame,
                     title: str = "Air-blow time vs Span",
                     save_path: Optional[str] = None):
@@ -817,6 +855,10 @@ def plot_AT_vs_Span(df: pd.DataFrame,
     Air-blow time vs Span (D80/D20).
     Uses mean Span / A_T per sample & diaphragm state.
     Legend labels = D10 per sample.
+    Marker shape encodes diaphragm state:
+        circle = diaphragm on (1)
+        triangle = diaphragm off (0)
+    Separate quadratic trends for dia on/off.
     """
     required = {"D80/D20", "D10", "A_T", SAMPLE_CODE_COL, "Diaphragm_on"}
     if not required.issubset(df.columns):
@@ -841,16 +883,17 @@ def plot_AT_vs_Span(df: pd.DataFrame,
 
     fig, ax = plt.subplots(figsize=(7, 4))
 
-    # scatter means only
+    # scatter means only, marker by diaphragm state
     for code in sorted(stats[SAMPLE_CODE_COL].unique()):
         sub = stats[stats[SAMPLE_CODE_COL] == code]
         colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
 
         for _, row in sub.iterrows():
+            marker = "o" if row["Diaphragm_on"] == 1 else "^"
             ax.scatter(
                 row["Span_mean"],
                 row["AT_mean"],
-                marker="o",
+                marker=marker,
                 edgecolors="k",
                 alpha=0.9,
                 s=70,
@@ -873,15 +916,31 @@ def plot_AT_vs_Span(df: pd.DataFrame,
 
             print(f"{code}: ?Time (dia - no dia) = {y1 - y0:.2f} s")
 
-    # ----- trend line (quadratic, based on means) -----
-    x = stats["Span_mean"].to_numpy(dtype=float)
-    y = stats["AT_mean"].to_numpy(dtype=float)
-    if len(x) >= 3:
-        coeffs = np.polyfit(x, y, deg=2)
-        x_fit = np.linspace(x.min(), x.max(), 200)
-        y_fit = np.polyval(coeffs, x_fit)
-        ax.plot(x_fit, y_fit, color="black", linewidth=2,
-                linestyle="--", label="Trend")
+    # ----- trend lines (quadratic, based on means for each dia state) -----
+    stats_on = stats[stats["Diaphragm_on"] == 1]
+    stats_off = stats[stats["Diaphragm_on"] == 0]
+
+    # dia ON
+    if len(stats_on) >= 3:
+        x_on = stats_on["Span_mean"].to_numpy(dtype=float)
+        y_on = stats_on["AT_mean"].to_numpy(dtype=float)
+        coeffs_on = np.polyfit(x_on, y_on, deg=2)
+        x_fit_on = np.linspace(x_on.min(), x_on.max(), 200)
+        y_fit_on = np.polyval(coeffs_on, x_fit_on)
+        ax.plot(x_fit_on, y_fit_on,
+                color="black", linewidth=2, linestyle="--",
+                label="Trend (Dia on)")
+
+    # dia OFF
+    if len(stats_off) >= 3:
+        x_off = stats_off["Span_mean"].to_numpy(dtype=float)
+        y_off = stats_off["AT_mean"].to_numpy(dtype=float)
+        coeffs_off = np.polyfit(x_off, y_off, deg=2)
+        x_fit_off = np.linspace(x_off.min(), x_off.max(), 200)
+        y_fit_off = np.polyval(coeffs_off, x_fit_off)
+        ax.plot(x_fit_off, y_fit_off,
+                color="black", linewidth=2, linestyle=":",
+                label="Trend (Dia off)")
 
     ax.set_xlabel("Span (D80/D20)")
     ax.set_ylabel("Air-blow time (s)")
@@ -909,10 +968,185 @@ def plot_AT_vs_Span(df: pd.DataFrame,
                    markerfacecolor=colour, markeredgecolor="k",
                    markersize=7, label=label)
         )
-    if len(x) >= 3:
+
+    # marker-shape legend for diaphragm state
+    dia_on_handle = Line2D([0], [0], marker="o", color="none",
+                           markerfacecolor="lightgrey", markeredgecolor="k",
+                           markersize=7, label="Dia on")
+    dia_off_handle = Line2D([0], [0], marker="^", color="none",
+                            markerfacecolor="lightgrey", markeredgecolor="k",
+                            markersize=7, label="Dia off")
+    legend_handles.extend([dia_on_handle, dia_off_handle])
+
+    # trend legend
+    if len(stats_on) >= 3:
         legend_handles.append(
             Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend")
+                   label="Trend (Dia on)")
+        )
+    if len(stats_off) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle=":",
+                   label="Trend (Dia off)")
+        )
+
+    ax.legend(handles=legend_handles,
+              bbox_to_anchor=(1.02, 1),
+              loc="upper left", borderaxespad=0.)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+
+def plot_FMC_vs_D10(df: pd.DataFrame,
+                    title: str = "Final moisture vs D10",
+                    save_path: Optional[str] = None):
+    """
+    Final moisture content (FMC) vs D10.
+    Uses mean D10 / FMC per sample & diaphragm state.
+    Legend labels = Span (D80/D20) per sample.
+    Marker shape encodes diaphragm state:
+        circle = diaphragm on (1)
+        triangle = diaphragm off (0)
+    Separate quadratic trends for dia on/off.
+    """
+    # allow either 'FMC' or 'Mc_%' as the moisture column
+    if "FMC" in df.columns:
+        y_col = "FMC"
+    elif "Mc_%" in df.columns:
+        y_col = "Mc_%"
+    else:
+        raise ValueError("DataFrame must contain either 'FMC' or 'Mc_%' for moisture content.")
+
+    required = {"D10", "D80/D20", y_col, SAMPLE_CODE_COL, "Diaphragm_on"}
+    if not required.issubset(df.columns):
+        raise ValueError(f"DataFrame must contain: {required}")
+
+    df_plot = df[list(required)].copy()
+
+    # numeric columns
+    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
+    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
+    df_plot[y_col] = _get_numeric_1d(df_plot[y_col])
+    df_plot = df_plot.dropna(subset=["D10", y_col, "D80/D20"])
+
+    # ----- diaphragm effect per sample (mean dia on/off) -----
+    stats = (
+        df_plot
+        .groupby([SAMPLE_CODE_COL, "Diaphragm_on"])
+        .agg(D10_mean=("D10", "mean"),
+             Span_mean=("D80/D20", "mean"),
+             FMC_mean=(y_col, "mean"))
+        .reset_index()
+    )
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    # scatter means only, marker by diaphragm state
+    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
+        sub = stats[stats[SAMPLE_CODE_COL] == code]
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+
+        for _, row in sub.iterrows():
+            marker = "o" if row["Diaphragm_on"] == 1 else "^"
+            ax.scatter(
+                row["D10_mean"],
+                row["FMC_mean"],
+                marker=marker,
+                edgecolors="k",
+                alpha=0.9,
+                s=70,
+                c=[colour],
+            )
+
+        # vertical connector line (dia effect) if both states exist
+        if {0, 1}.issubset(set(sub["Diaphragm_on"])):
+            d10_mean = sub["D10_mean"].mean()
+            y0 = sub.loc[sub["Diaphragm_on"] == 0, "FMC_mean"].iloc[0]
+            y1 = sub.loc[sub["Diaphragm_on"] == 1, "FMC_mean"].iloc[0]
+
+            ax.plot(
+                [d10_mean, d10_mean],
+                [y0, y1],
+                color="grey",
+                linewidth=2,
+                alpha=0.8,
+            )
+
+            print(f"{code}: ?FMC (dia - no dia) = {y1 - y0:.2f} %")
+
+    # ----- trend lines (quadratic, per dia state) -----
+    stats_on = stats[stats["Diaphragm_on"] == 1]
+    stats_off = stats[stats["Diaphragm_on"] == 0]
+
+    if len(stats_on) >= 3:
+        x_on = stats_on["D10_mean"].to_numpy(dtype=float)
+        y_on = stats_on["FMC_mean"].to_numpy(dtype=float)
+        coeffs_on = np.polyfit(x_on, y_on, deg=2)
+        x_fit_on = np.linspace(x_on.min(), x_on.max(), 200)
+        y_fit_on = np.polyval(coeffs_on, x_fit_on)
+        ax.plot(x_fit_on, y_fit_on,
+                color="black", linewidth=2, linestyle="--",
+                label="Trend (Dia on)")
+
+    if len(stats_off) >= 3:
+        x_off = stats_off["D10_mean"].to_numpy(dtype=float)
+        y_off = stats_off["FMC_mean"].to_numpy(dtype=float)
+        coeffs_off = np.polyfit(x_off, y_off, deg=2)
+        x_fit_off = np.linspace(x_off.min(), x_off.max(), 200)
+        y_fit_off = np.polyval(coeffs_off, x_fit_off)
+        ax.plot(x_fit_off, y_fit_off,
+                color="black", linewidth=2, linestyle=":",
+                label="Trend (Dia off)")
+
+    ax.set_xlabel("D10 (\u00B5m)")
+    ax.set_ylabel("Final moisture content (%)")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+
+    # force axes to start at zero
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    # legend: label by Span (mean Span per sample)
+    span_by_code = (
+        stats
+        .groupby(SAMPLE_CODE_COL)["Span_mean"]
+        .mean()
+    )
+
+    legend_handles = []
+    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        span_val = span_by_code.loc[code]
+        label = f"Span={span_val:.2f}"
+        legend_handles.append(
+            Line2D([0], [0], marker="o", color="none",
+                   markerfacecolor=colour, markeredgecolor="k",
+                   markersize=7, label=label)
+        )
+
+    # marker-shape legend for diaphragm state
+    dia_on_handle = Line2D([0], [0], marker="o", color="none",
+                           markerfacecolor="lightgrey", markeredgecolor="k",
+                           markersize=7, label="Dia on")
+    dia_off_handle = Line2D([0], [0], marker="^", color="none",
+                            markerfacecolor="lightgrey", markeredgecolor="k",
+                            markersize=7, label="Dia off")
+    legend_handles.extend([dia_on_handle, dia_off_handle])
+
+    # trend legend
+    if len(stats_on) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle="--",
+                   label="Trend (Dia on)")
+        )
+    if len(stats_off) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle=":",
+                   label="Trend (Dia off)")
         )
 
     ax.legend(handles=legend_handles,
@@ -926,11 +1160,172 @@ def plot_AT_vs_Span(df: pd.DataFrame,
 
 
 
+def plot_FMC_vs_Span(df: pd.DataFrame,
+                     title: str = "Final moisture vs Span",
+                     save_path: Optional[str] = None):
+    """
+    Final moisture content (FMC) vs Span (D80/D20).
+    Uses mean Span / FMC per sample & diaphragm state.
+    Legend labels = D10 per sample.
+    Marker shape encodes diaphragm state:
+        circle = diaphragm on (1)
+        triangle = diaphragm off (0)
+    Separate quadratic trends for dia on/off.
+    """
+    # allow either 'FMC' or 'Mc_%' as the moisture column
+    if "FMC" in df.columns:
+        y_col = "FMC"
+    elif "Mc_%" in df.columns:
+        y_col = "Mc_%"
+    else:
+        raise ValueError("DataFrame must contain either 'FMC' or 'Mc_%' for moisture content.")
+
+    required = {"D80/D20", "D10", y_col, SAMPLE_CODE_COL, "Diaphragm_on"}
+    if not required.issubset(df.columns):
+        raise ValueError(f"DataFrame must contain: {required}")
+
+    df_plot = df[list(required)].copy()
+
+    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
+    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
+    df_plot[y_col] = _get_numeric_1d(df_plot[y_col])
+    df_plot = df_plot.dropna(subset=["D80/D20", y_col, "D10"])
+
+    # ----- diaphragm effect per sample (mean dia on/off) -----
+    stats = (
+        df_plot
+        .groupby([SAMPLE_CODE_COL, "Diaphragm_on"])
+        .agg(Span_mean=("D80/D20", "mean"),
+             D10_mean=("D10", "mean"),
+             FMC_mean=(y_col, "mean"))
+        .reset_index()
+    )
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    # scatter means only, marker by diaphragm state
+    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
+        sub = stats[stats[SAMPLE_CODE_COL] == code]
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+
+        for _, row in sub.iterrows():
+            marker = "o" if row["Diaphragm_on"] == 1 else "^"
+            ax.scatter(
+                row["Span_mean"],
+                row["FMC_mean"],
+                marker=marker,
+                edgecolors="k",
+                alpha=0.9,
+                s=70,
+                c=[colour],
+            )
+
+        # vertical connector line (dia effect) if both states exist
+        if {0, 1}.issubset(set(sub["Diaphragm_on"])):
+            span_mean = sub["Span_mean"].mean()
+            y0 = sub.loc[sub["Diaphragm_on"] == 0, "FMC_mean"].iloc[0]
+            y1 = sub.loc[sub["Diaphragm_on"] == 1, "FMC_mean"].iloc[0]
+
+            ax.plot(
+                [span_mean, span_mean],
+                [y0, y1],
+                color="grey",
+                linewidth=2,
+                alpha=0.8,
+            )
+
+            print(f"{code}: ?FMC (dia - no dia) = {y1 - y0:.2f} %")
+
+    # ----- trend lines (quadratic, per dia state) -----
+    stats_on = stats[stats["Diaphragm_on"] == 1]
+    stats_off = stats[stats["Diaphragm_on"] == 0]
+
+    if len(stats_on) >= 3:
+        x_on = stats_on["Span_mean"].to_numpy(dtype=float)
+        y_on = stats_on["FMC_mean"].to_numpy(dtype=float)
+        coeffs_on = np.polyfit(x_on, y_on, deg=2)
+        x_fit_on = np.linspace(x_on.min(), x_on.max(), 200)
+        y_fit_on = np.polyval(coeffs_on, x_fit_on)
+        ax.plot(x_fit_on, y_fit_on,
+                color="black", linewidth=2, linestyle="--",
+                label="Trend (Dia on)")
+
+    if len(stats_off) >= 3:
+        x_off = stats_off["Span_mean"].to_numpy(dtype=float)
+        y_off = stats_off["FMC_mean"].to_numpy(dtype=float)
+        coeffs_off = np.polyfit(x_off, y_off, deg=2)
+        x_fit_off = np.linspace(x_off.min(), x_off.max(), 200)
+        y_fit_off = np.polyval(coeffs_off, x_fit_off)
+        ax.plot(x_fit_off, y_fit_off,
+                color="black", linewidth=2, linestyle=":",
+                label="Trend (Dia off)")
+
+    ax.set_xlabel("Span (D80/D20)")
+    ax.set_ylabel("Final moisture content (%)")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+
+    # force axes to start at zero
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    # legend: label by D10 (mean per sample)
+    d10_by_code = (
+        stats
+        .groupby(SAMPLE_CODE_COL)["D10_mean"]
+        .mean()
+    )
+
+    legend_handles = []
+    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
+        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
+        d10_val = d10_by_code.loc[code]
+        label = f"D10={d10_val:.1f} \u00B5m"
+        legend_handles.append(
+            Line2D([0], [0], marker="o", color="none",
+                   markerfacecolor=colour, markeredgecolor="k",
+                   markersize=7, label=label)
+        )
+
+    # marker-shape legend for diaphragm state
+    dia_on_handle = Line2D([0], [0], marker="o", color="none",
+                           markerfacecolor="lightgrey", markeredgecolor="k",
+                           markersize=7, label="Dia on")
+    dia_off_handle = Line2D([0], [0], marker="^", color="none",
+                            markerfacecolor="lightgrey", markeredgecolor="k",
+                            markersize=7, label="Dia off")
+    legend_handles.extend([dia_on_handle, dia_off_handle])
+
+    # trend legend
+    if len(stats_on) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle="--",
+                   label="Trend (Dia on)")
+        )
+    if len(stats_off) >= 3:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle=":",
+                   label="Trend (Dia off)")
+        )
+
+    ax.legend(handles=legend_handles,
+              bbox_to_anchor=(1.02, 1),
+              loc="upper left", borderaxespad=0.)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+
+
+
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 
 def main():
+    
     parser = argparse.ArgumentParser(
         description="Empirical FMC figures vs D10, Span and diaphragm (no models).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -962,6 +1357,12 @@ def main():
     print(f"Usable empirical rows after merge & filtering: {len(df)}\n")
 
     # ---- Make figures (all using the same df) ----
+    plot_FT_vs_D10(df)
+    plot_FT_vs_Span(df)
+    plot_AT_vs_D10(df)
+    plot_AT_vs_Span(df)
+    plot_FMC_vs_D10(df, title="Final Moisture vs D10")
+    plot_FMC_vs_Span(df, title="Final Moisture vs Span")
     plot_interaction_d10_diaphragm(df)
     plot_interaction_span_diaphragm(df)
     plot_boxplot_d10_classes(df)
@@ -978,10 +1379,7 @@ def main():
         title_base="D10 vs Span coloured by FMC",
         save_path_base=None,
     )
-    plot_FT_vs_D10(df)
-    plot_FT_vs_Span(df)
-    plot_AT_vs_D10(df)
-    plot_AT_vs_Span(df)
+    
 
 
 if __name__ == "__main__":
