@@ -13,8 +13,9 @@ for non-linear comparison.
 
 Also includes interaction features so LASSO can model
 "diaphragm effect depends on PSD":
-  - D10_Dia  = D10 * Diaphragm_on
-  - Span_Dia = (D80/D20) * Diaphragm_on
+  - D10_Dia   = D10 * Diaphragm_on
+  - Span_Dia  = (D80/D20) * Diaphragm_on
+  - D10_Span  = D10 * (D80/D20)
 
 Training is done on a subset of sheet 'DB_2'.
 Internal validation uses a held-out subset of DB_2.
@@ -55,25 +56,25 @@ DEFAULT_XLSX_PATH = r"C:\Users\devli\OneDrive - Imperial College London\MSci - D
 DEFAULT_TARGET_COL = "Mc_%"
 
 # PSD + operational + interaction features
-# PSD + operational + interaction features
 DEFAULT_FEATURE_COLS = [
     # PSD indices
     "D10",
-    #"D20",
-    #"D50",
-    #"D80",
-    #"D90",
-    #"D90/D50",
-    #"D50/D10",
+    # "D20",
+    # "D50",
+    # "D80",
+    # "D90",
+    # "D90/D50",
+    # "D50/D10",
     "D80/D20",
     # operational variables from DB_2 / DB
-    #"A_Flow",
+    # "A_Flow",
     "Diaphragm_on",
     # interactions (PSD x Diaphragm)
-    "D10_Dia",   # D10 * Diaphragm_on
-    "Span_Dia",  # (D80/D20) * Diaphragm_on
-    # quadratic term
+    "D10_Dia",    # D10 * Diaphragm_on
+    "Span_Dia",   # (D80/D20) * Diaphragm_on
+    # quadratic / interaction terms
     "D10^2",
+    "D10_Span",   # D10 * (D80/D20)  <-- NEW TERM FOR CURVATURE
 ]
 
 
@@ -178,26 +179,15 @@ def merge_db_psd(df_db, df_psd, features, target_col):
         "STD", case=False, na=False
     ).astype(int)
 
-    # Interaction terms
-    df["D10_Dia"] = df["D10"] * df["Diaphragm_on"]
-    df["Span_Dia"] = df["D80/D20"] * df["Diaphragm_on"]
-        # Diaphragm_on: 1 if Test_procedure contains "STD", else 0
-    df["Diaphragm_on"] = df[TEST_PROC_COL].astype(str).str.contains(
-        "STD", case=False, na=False
-    ).astype(int)
-
-    # Interaction terms
+    # Interaction terms with diaphragm
     df["D10_Dia"] = df["D10"] * df["Diaphragm_on"]
     df["Span_Dia"] = df["D80/D20"] * df["Diaphragm_on"]
 
     # Quadratic term
     df["D10^2"] = df["D10"] ** 2
 
-    # Select only needed columns
-    cols_to_keep = [SAMPLE_CODE_COL, target_col] + features
-    df = df[cols_to_keep].copy()
-
-
+    # NEW: Bilinear interaction term D10 * Span
+    df["D10_Span"] = df["D10"] * df["D80/D20"]
 
     # Select only needed columns
     cols_to_keep = [SAMPLE_CODE_COL, target_col] + features
@@ -467,6 +457,8 @@ def plot_pdp_2d_d20_span(
     # Recompute engineered features consistent with grid_df values
     if "D10^2" in features:
         grid_df["D10^2"] = grid_df["D10"] ** 2
+    if "D10_Span" in features and "D80/D20" in features:
+        grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
     if "D10_Dia" in features and "Diaphragm_on" in features:
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
     if "Span_Dia" in features and "D80/D20" in features and "Diaphragm_on" in features:
@@ -496,11 +488,15 @@ def plot_pdp_2d_d20_span(
         grid_off["Diaphragm_on"] = 0
         grid_off["D10_Dia"] = grid_off["D10"] * grid_off["Diaphragm_on"]
         grid_off["Span_Dia"] = grid_off["D80/D20"] * grid_off["Diaphragm_on"]
+        if "D10_Span" in features:
+            grid_off["D10_Span"] = grid_off["D10"] * grid_off["D80/D20"]
 
         # diaphragm ON
         grid_on["Diaphragm_on"] = 1
         grid_on["D10_Dia"] = grid_on["D10"] * grid_on["Diaphragm_on"]
         grid_on["Span_Dia"] = grid_on["D80/D20"] * grid_on["Diaphragm_on"]
+        if "D10_Span" in features:
+            grid_on["D10_Span"] = grid_on["D10"] * grid_on["D80/D20"]
 
         # Predict FMC (%) for both states
         Z_off = 100 * pipe.predict(grid_off[features].to_numpy(dtype=float)).reshape(ny, nx)
@@ -521,7 +517,8 @@ def plot_pdp_2d_d20_span(
         )
 
         # Optional label on the curve
-        ax.clabel(cs, fmt={delta_threshold: "?FMC = 0"}, inline=True, fontsize=8)
+        label_str = f"?FMC = {delta_threshold:.1f}"
+        ax.clabel(cs, fmt={delta_threshold: label_str}, inline=True, fontsize=8)
 
         # Small text box explaining sign convention
         ax.text(
@@ -550,7 +547,6 @@ def plot_pdp_2d_d20_span(
     plt.show()
 
 
-
 def plot_pdp_d10_diaphragm(
     pipe: Pipeline,
     df: pd.DataFrame,
@@ -563,8 +559,8 @@ def plot_pdp_d10_diaphragm(
       - Diaphragm_on = 0
       - Diaphragm_on = 1
 
-    Interaction features (D10_Dia, Span_Dia) are recomputed so they stay
-    consistent with the chosen Diaphragm_on.
+    Interaction features (D10_Dia, Span_Dia, D10_Span) are recomputed so they stay
+    consistent with the chosen Diaphragm_on and D10.
     """
     required = {"D10", "Diaphragm_on", "D10_Dia", "Span_Dia", "D80/D20"}
     if not required.issubset(features):
@@ -581,6 +577,10 @@ def plot_pdp_d10_diaphragm(
         # recompute interactions correctly using D10
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
+        if "D10_Span" in features:
+            grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
+        if "D10^2" in features:
+            grid_df["D10^2"] = grid_df["D10"] ** 2
 
         y_pred = 100 * pipe.predict(grid_df[features].to_numpy(dtype=float))
         preds[dia] = y_pred
@@ -610,8 +610,7 @@ def plot_delta_d10_diaphragm(
 ):
     """
     Plot ?FMC(D10) = FMC(diaphragm on) - FMC(no diaphragm) vs D10
-    for the LASSO model. This will always be a straight line
-    because LASSO is linear (even with interactions).
+    for the LASSO model.
     """
     required = {"D10", "Diaphragm_on", "D10_Dia", "Span_Dia", "D80/D20"}
     if not required.issubset(features):
@@ -627,6 +626,10 @@ def plot_delta_d10_diaphragm(
         grid_df["Diaphragm_on"] = dia
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
+        if "D10_Span" in features:
+            grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
+        if "D10^2" in features:
+            grid_df["D10^2"] = grid_df["D10"] ** 2
 
         y_pred = 100 * pipe.predict(grid_df[features].to_numpy(dtype=float))
         preds[dia] = y_pred
@@ -680,6 +683,10 @@ def plot_delta_dia_tree(
         # D10 stays at mean; D10_Dia uses D10, not D20
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
+        if "D10_Span" in features:
+            grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
+        if "D10^2" in features:
+            grid_df["D10^2"] = grid_df["D10"] ** 2
 
         y_pred = 100 * model.predict(grid_df[features].to_numpy(dtype=float))
         preds[dia] = y_pred
@@ -806,6 +813,7 @@ def plot_empirical_d10_diaphragm(
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
 
+
 def plot_empirical_span_diaphragm(
     df: pd.DataFrame,
     target_col: str = DEFAULT_TARGET_COL,
@@ -897,6 +905,7 @@ def plot_empirical_span_diaphragm(
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
 
+
 def plot_empirical_delta_span_diaphragm(
     df: pd.DataFrame,
     target_col: str = DEFAULT_TARGET_COL,
@@ -971,6 +980,7 @@ def plot_empirical_delta_span_diaphragm(
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
+
 
 def plot_empirical_delta_d10_diaphragm(
     df: pd.DataFrame,
@@ -1056,6 +1066,7 @@ def plot_empirical_delta_d10_diaphragm(
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
 
+
 def plot_delta_span_diaphragm(
     pipe: Pipeline,
     df: pd.DataFrame,
@@ -1067,7 +1078,7 @@ def plot_delta_span_diaphragm(
     Plot ?FMC(Span) = FMC(diaphragm on) - FMC(no diaphragm) vs Span (D80/D20)
     for the LASSO model.
 
-    D10 is held at its mean; Span (D80/D20) is varied and Span_Dia is updated.
+    D10 is held at its mean; Span (D80/D20) is varied and Span_Dia (and D10_Span) are updated.
     """
     required = {"D80/D20", "Diaphragm_on", "D10_Dia", "Span_Dia", "D10"}
     if not required.issubset(set(features)):
@@ -1087,6 +1098,10 @@ def plot_delta_span_diaphragm(
         # Interactions: Span_Dia uses Span, D10_Dia uses D10 (held at mean)
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
+        if "D10_Span" in features:
+            grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
+        if "D10^2" in features:
+            grid_df["D10^2"] = grid_df["D10"] ** 2
 
         y_pred = 100 * pipe.predict(grid_df[features].to_numpy(dtype=float))
         preds[dia] = y_pred
@@ -1106,6 +1121,8 @@ def plot_delta_span_diaphragm(
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
+
+
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
@@ -1185,7 +1202,7 @@ def main():
         title="Model validation (20% hold-out)",
     )
 
-    # 2D surface + “any effect” boundary (?FMC = 0)
+    # 2D surface + "any effect" boundary (?FMC = 0)
     plot_pdp_2d_d20_span(
         pipe_lasso,
         df_features_train,
@@ -1194,17 +1211,16 @@ def main():
         delta_threshold=0.0,   # diaphragm just starts/stops helping
     )
 
-    # 2D surface + “? 1% reduction” boundary (?FMC = -1 %)
+    # 2D surface + "? 3% reduction" boundary (?FMC = -3)
     plot_pdp_2d_d20_span(
         pipe_lasso,
         df_features_train,
         DEFAULT_FEATURE_COLS,
-        title="Model Predicted FMC (? 1% diaphragm benefit)",
-        delta_threshold=3.0,  # diaphragm gives 1% lower FMC
+        title="Model Predicted FMC (? 3% diaphragm benefit)",
+        delta_threshold=-3.0,  # diaphragm gives 3% lower FMC
     )
 
-
-    # Diaphragm effect plots for LASSO (linear, model-based)
+    # Diaphragm effect plots for LASSO (linear model with nonlinear features)
     plot_pdp_d10_diaphragm(
         pipe_lasso,
         df_features_train,
@@ -1253,7 +1269,6 @@ def main():
     excluded_codes = {"Si_BM", "Si_Rep_new"}
     df_db_val_inc = df_db_val_inc[~df_db_val_inc[SAMPLE_CODE_COL].isin(excluded_codes)].copy()
 
-
     if df_db_val_inc.empty:
         error("No external validation rows left after filtering to specified sample codes in DB.")
 
@@ -1264,7 +1279,7 @@ def main():
         target_col=args.target_col,
     )
 
-    print(f"External validation rows from sheet '{args.sheet_db_val}' (Si_BM/Si_Rep_new): {len(df_val_merged)}\n")
+    print(f"External validation rows from sheet '{args.sheet_db_val}' (after filtering): {len(df_val_merged)}\n")
 
     # External validation metrics & graph (DB) for LASSO
     y_val_ext_pred, r2_ext, rmse_ext = report_held_out_metrics(
@@ -1275,7 +1290,7 @@ def main():
         y_val_ext,
         y_val_ext_pred,
         sample_codes=df_val_merged[SAMPLE_CODE_COL].values,
-        title="LASSO - External validation (DB: Si_BM, Si_Rep_new)",
+        title="LASSO - External validation (DB samples)",
     )
 
     # --------- Random Forest / Gradient Boosting REMOVED FROM EXECUTION ---------
