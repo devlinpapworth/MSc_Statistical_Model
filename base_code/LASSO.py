@@ -55,23 +55,27 @@ DEFAULT_XLSX_PATH = r"C:\Users\devli\OneDrive - Imperial College London\MSci - D
 DEFAULT_TARGET_COL = "Mc_%"
 
 # PSD + operational + interaction features
+# PSD + operational + interaction features
 DEFAULT_FEATURE_COLS = [
     # PSD indices
     "D10",
-    "D20",
-    "D50",
-    "D80",
-    "D90",
-    "D90/D50",
-    "D50/D10",
+    #"D20",
+    #"D50",
+    #"D80",
+    #"D90",
+    #"D90/D50",
+    #"D50/D10",
     "D80/D20",
     # operational variables from DB_2 / DB
-    "A_Flow",
+    #"A_Flow",
     "Diaphragm_on",
     # interactions (PSD x Diaphragm)
     "D10_Dia",   # D10 * Diaphragm_on
     "Span_Dia",  # (D80/D20) * Diaphragm_on
+    # quadratic term
+    "D10^2",
 ]
+
 
 SAMPLE_CODE_COL = "Sample Code"
 FLAG_COL = "flag"
@@ -177,6 +181,23 @@ def merge_db_psd(df_db, df_psd, features, target_col):
     # Interaction terms
     df["D10_Dia"] = df["D10"] * df["Diaphragm_on"]
     df["Span_Dia"] = df["D80/D20"] * df["Diaphragm_on"]
+        # Diaphragm_on: 1 if Test_procedure contains "STD", else 0
+    df["Diaphragm_on"] = df[TEST_PROC_COL].astype(str).str.contains(
+        "STD", case=False, na=False
+    ).astype(int)
+
+    # Interaction terms
+    df["D10_Dia"] = df["D10"] * df["Diaphragm_on"]
+    df["Span_Dia"] = df["D80/D20"] * df["Diaphragm_on"]
+
+    # Quadratic term
+    df["D10^2"] = df["D10"] ** 2
+
+    # Select only needed columns
+    cols_to_keep = [SAMPLE_CODE_COL, target_col] + features
+    df = df[cols_to_keep].copy()
+
+
 
     # Select only needed columns
     cols_to_keep = [SAMPLE_CODE_COL, target_col] + features
@@ -259,7 +280,7 @@ def summarise_lasso(pipe: Pipeline, features: list[str]):
 
 
 # ---------------------------------------------------------------------
-# Tree-based models (RF & GB)
+# Tree-based models (RF & GB)  -- definitions left but unused
 # ---------------------------------------------------------------------
 
 def fit_random_forest(X, y):
@@ -403,15 +424,27 @@ def plot_pdp_2d_d20_span(
     ny: int = 40,
     title: str = "Predicted FMC as a function of D10 and D80/D20",
     save_path: Optional[str] = None,
+    delta_threshold: float = 0.0,  # boundary where ?FMC = threshold (default = 0)
 ):
-    
+    """
+    2D PDP of predicted FMC vs D10 and Span (D80/D20).
+
+    Overlays a red curve where the diaphragm effect becomes significant:
+        ?FMC = FMC(diaphragm on) - FMC(no diaphragm)
+
+    By default, the red curve is the ?FMC = 0 contour
+    (i.e., where the diaphragm stops helping / starts helping).
+    """
+
     # Ensure both features exist
     for f in (feature_x, feature_y):
         if f not in features:
             raise ValueError(f"{f} is not in feature list {features}")
 
+    # Work from the mean feature vector as baseline
     X = df[features].to_numpy(dtype=float)
     base = X.mean(axis=0)
+
     ix = features.index(feature_x)
     iy = features.index(feature_y)
 
@@ -419,11 +452,27 @@ def plot_pdp_2d_d20_span(
     y_vals = np.linspace(df[feature_y].min(), df[feature_y].max(), ny)
 
     XX, YY = np.meshgrid(x_vals, y_vals)
+
+    # Start from the mean row and vary D10 and Span
     grid = np.tile(base, (nx * ny, 1))
     grid[:, ix] = XX.ravel()
     grid[:, iy] = YY.ravel()
 
-    Z = 100 * pipe.predict(grid).reshape(ny, nx)
+    # Base grid DataFrame
+    grid_df = pd.DataFrame(grid, columns=features)
+
+    # ------------------------------------------------------------------
+    # 1) Predicted FMC surface (for the current "mean" diaphragm state)
+    # ------------------------------------------------------------------
+    # Recompute engineered features consistent with grid_df values
+    if "D10^2" in features:
+        grid_df["D10^2"] = grid_df["D10"] ** 2
+    if "D10_Dia" in features and "Diaphragm_on" in features:
+        grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
+    if "Span_Dia" in features and "D80/D20" in features and "Diaphragm_on" in features:
+        grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
+
+    Z = 100 * pipe.predict(grid_df[features].to_numpy(dtype=float)).reshape(ny, nx)
 
     fig, ax = plt.subplots(figsize=(7, 5))
     cf = ax.contourf(XX, YY, Z, levels=15)
@@ -434,28 +483,73 @@ def plot_pdp_2d_d20_span(
     ax.set_ylabel(feature_y)
     ax.set_title(title)
 
-    # ---- Vertical RED line at exactly D20 = 20 m ----
-    x_line = 22.0
-    ax.axvline(x_line, linestyle=":", color="red", linewidth=1.8)
+    # ------------------------------------------------------------------
+    # 2) Diaphragm effect ?FMC(D10, Span) from the same model
+    # ------------------------------------------------------------------
+    required_for_delta = {"Diaphragm_on", "D10_Dia", "Span_Dia"}
+    if required_for_delta.issubset(set(features)):
+        # Build two copies: dia=0 and dia=1, recomputing interactions
+        grid_off = grid_df.copy()
+        grid_on = grid_df.copy()
 
-    # Label the vertical line
-    y_mid = (df[feature_y].min() + df[feature_y].max()) / 2
-    ax.text(
-        x_line,
-        y_mid,
-        "Diaphragm\nthreshold",
-        color="red",
-        fontsize=9,
-        ha="left",
-        va="center",
-        rotation=90,
-        rotation_mode="anchor",
-    )
+        # diaphragm OFF
+        grid_off["Diaphragm_on"] = 0
+        grid_off["D10_Dia"] = grid_off["D10"] * grid_off["Diaphragm_on"]
+        grid_off["Span_Dia"] = grid_off["D80/D20"] * grid_off["Diaphragm_on"]
+
+        # diaphragm ON
+        grid_on["Diaphragm_on"] = 1
+        grid_on["D10_Dia"] = grid_on["D10"] * grid_on["Diaphragm_on"]
+        grid_on["Span_Dia"] = grid_on["D80/D20"] * grid_on["Diaphragm_on"]
+
+        # Predict FMC (%) for both states
+        Z_off = 100 * pipe.predict(grid_off[features].to_numpy(dtype=float)).reshape(ny, nx)
+        Z_on  = 100 * pipe.predict(grid_on[features].to_numpy(dtype=float)).reshape(ny, nx)
+
+        # Diaphragm effect
+        # ?FMC = FMC(dia on) - FMC(no dia)
+        Z_delta = Z_on - Z_off
+
+        # Contour where ?FMC = delta_threshold (usually 0)
+        cs = ax.contour(
+            XX,
+            YY,
+            Z_delta,
+            levels=[delta_threshold],
+            colors="red",
+            linewidths=2.0,
+        )
+
+        # Optional label on the curve
+        ax.clabel(cs, fmt={delta_threshold: "?FMC = 0"}, inline=True, fontsize=8)
+
+        # Small text box explaining sign convention
+        ax.text(
+            0.02,
+            0.02,
+            "?FMC = FMC(dia) - FMC(no dia)\n"
+            "Below red curve: diaphragm reduces FMC",
+            transform=ax.transAxes,
+            fontsize=8,
+            va="bottom",
+            ha="left",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+        )
+
+    else:
+        # If for some reason interaction features aren't in the model,
+        # we silently skip the diaphragm boundary.
+        print(
+            "Warning: cannot compute diaphragm boundary - "
+            "features do not include Diaphragm_on, D10_Dia, Span_Dia."
+        )
 
     plt.tight_layout()
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
+
+
 
 def plot_pdp_d10_diaphragm(
     pipe: Pipeline,
@@ -1046,7 +1140,8 @@ def main():
 
     # ---------- DB_2: load and merge (for training + internal validation) ----------
     df_db_train_full, df_psd = load_sheets(args.xlsx_path, args.sheet_db_train, args.sheet_psd)
-    df_db_train_inc = apply_flag_filter(df_db_train_full)
+    # Use ALL rows from DB_2 (no flag filter)
+    df_db_train_inc = df_db_train_full
 
     df_train_merged, X_all, y_all = merge_db_psd(
         df_db_train_inc,
@@ -1059,6 +1154,7 @@ def main():
     print(f"Features: {DEFAULT_FEATURE_COLS}")
     print(f"Target:   {args.target_col}\n")
 
+    df_features_train = df_train_merged[DEFAULT_FEATURE_COLS].copy()
     sample_codes_all = df_train_merged[SAMPLE_CODE_COL].to_numpy()
 
     # ---------- INTERNAL HOLD-OUT SPLIT (DB_2) ----------
@@ -1089,14 +1185,24 @@ def main():
         title="Model validation (20% hold-out)",
     )
 
-    # 2D contour PDP using ALL DB_2 rows (for smoother surface)
-    df_features_train = df_train_merged[DEFAULT_FEATURE_COLS].copy()
+    # 2D surface + “any effect” boundary (?FMC = 0)
     plot_pdp_2d_d20_span(
         pipe_lasso,
         df_features_train,
         DEFAULT_FEATURE_COLS,
-        title="Model Predicted FMC as a function of D20 and D80/D20",
+        title="Model Predicted FMC (?FMC = 0 boundary)",
+        delta_threshold=0.0,   # diaphragm just starts/stops helping
     )
+
+    # 2D surface + “? 1% reduction” boundary (?FMC = -1 %)
+    plot_pdp_2d_d20_span(
+        pipe_lasso,
+        df_features_train,
+        DEFAULT_FEATURE_COLS,
+        title="Model Predicted FMC (? 1% diaphragm benefit)",
+        delta_threshold=3.0,  # diaphragm gives 1% lower FMC
+    )
+
 
     # Diaphragm effect plots for LASSO (linear, model-based)
     plot_pdp_d10_diaphragm(
@@ -1143,9 +1249,10 @@ def main():
     df_db_val, _ = load_sheets(args.xlsx_path, args.sheet_db_val, args.sheet_psd)
     df_db_val_inc = apply_flag_filter(df_db_val)
 
-    # Restrict external validation to specific sample codes
-    allowed_codes = {"Si_M", "Si_F", "Si_Rep", "Si_Rep_new", "Si_BM"}
-    df_db_val_inc = df_db_val_inc[df_db_val_inc[SAMPLE_CODE_COL].isin(allowed_codes)].copy()
+    # External validation: use ALL DB samples except Si_BM and Si_Rep_new
+    excluded_codes = {"Si_BM", "Si_Rep_new"}
+    df_db_val_inc = df_db_val_inc[~df_db_val_inc[SAMPLE_CODE_COL].isin(excluded_codes)].copy()
+
 
     if df_db_val_inc.empty:
         error("No external validation rows left after filtering to specified sample codes in DB.")
@@ -1157,7 +1264,7 @@ def main():
         target_col=args.target_col,
     )
 
-    print(f"External validation rows from sheet '{args.sheet_db_val}' (Si_M/Si_F/Si_Rep/Si_Rep_new/Si_BM): {len(df_val_merged)}\n")
+    print(f"External validation rows from sheet '{args.sheet_db_val}' (Si_BM/Si_Rep_new): {len(df_val_merged)}\n")
 
     # External validation metrics & graph (DB) for LASSO
     y_val_ext_pred, r2_ext, rmse_ext = report_held_out_metrics(
@@ -1168,45 +1275,11 @@ def main():
         y_val_ext,
         y_val_ext_pred,
         sample_codes=df_val_merged[SAMPLE_CODE_COL].values,
-        title="LASSO - External validation (DB: Si_M, Si_F, Si_Rep, Si_Rep_new, Si_BM)",
+        title="LASSO - External validation (DB: Si_BM, Si_Rep_new)",
     )
 
-    # ---------------- Random Forest (non-linear) ----------------
-    rf = fit_random_forest(X_train, y_train)
-    print("\n--- Random Forest held-out metrics ---")
-    _, r2_rf_int, rmse_rf_int = report_held_out_metrics(
-        rf, X_val_int, y_val_int, "RF INTERNAL validation"
-    )
-    _, r2_rf_ext, rmse_rf_ext = report_held_out_metrics(
-        rf, X_val_ext, y_val_ext, "RF EXTERNAL validation (DB samples)"
-    )
-
-    # Non-linear diaphragm effect vs D20 (Random Forest, model-based)
-    plot_delta_dia_tree(
-        rf,
-        df_features_train,
-        DEFAULT_FEATURE_COLS,
-        model_name="Random Forest",
-    )
-
-    # ---------------- Gradient Boosting (non-linear) ----------------
-    gb = fit_gradient_boosting(X_train, y_train)
-    print("\n--- Gradient Boosting held-out metrics ---")
-    _, r2_gb_int, rmse_gb_int = report_held_out_metrics(
-        gb, X_val_int, y_val_int, "GB INTERNAL validation"
-    )
-    _, r2_gb_ext, rmse_gb_ext = report_held_out_metrics(
-        gb, X_val_ext, y_val_ext, "GB EXTERNAL validation (DB samples)"
-    )
-
-    # Non-linear diaphragm effect vs D20 (Gradient Boosting, model-based)
-    plot_delta_dia_tree(
-        gb,
-        df_features_train,
-        DEFAULT_FEATURE_COLS,
-        model_name="Gradient Boosting",
-    )
-
+    # --------- Random Forest / Gradient Boosting REMOVED FROM EXECUTION ---------
+    # (functions remain defined above but are not called; only LASSO is used)
 
 
 if __name__ == "__main__":
