@@ -13,9 +13,9 @@ for non-linear comparison.
 
 Also includes interaction features so LASSO can model
 "diaphragm effect depends on PSD":
-  - D10_Dia   = D10 * Diaphragm_on
-  - Span_Dia  = (D80/D20) * Diaphragm_on
-  - D10_Span  = D10 * (D80/D20)
+  - D10_Dia       = D10 * Diaphragm_on
+  - Span_Dia      = (D80/D20) * Diaphragm_on
+  - D10_Span_Dia  = D10 * (D80/D20) * Diaphragm_on   # diaphragm-specific curvature
 
 Training is done on a subset of sheet 'DB_2'.
 Internal validation uses a held-out subset of DB_2.
@@ -70,11 +70,11 @@ DEFAULT_FEATURE_COLS = [
     # "A_Flow",
     "Diaphragm_on",
     # interactions (PSD x Diaphragm)
-    "D10_Dia",    # D10 * Diaphragm_on
-    "Span_Dia",   # (D80/D20) * Diaphragm_on
+    "D10_Dia",       # D10 * Diaphragm_on
+    "Span_Dia",      # (D80/D20) * Diaphragm_on
     # quadratic / interaction terms
     "D10^2",
-    "D10_Span",   # D10 * (D80/D20)  <-- NEW TERM FOR CURVATURE
+    "D10_Span_Dia",  # D10 * (D80/D20) * Diaphragm_on  <-- NEW TERM FOR CURVED ?FMC
 ]
 
 
@@ -186,8 +186,8 @@ def merge_db_psd(df_db, df_psd, features, target_col):
     # Quadratic term
     df["D10^2"] = df["D10"] ** 2
 
-    # NEW: Bilinear interaction term D10 * Span
-    df["D10_Span"] = df["D10"] * df["D80/D20"]
+    # NEW: diaphragm-specific bilinear term D10 * Span * Dia
+    df["D10_Span_Dia"] = df["D10"] * df["D80/D20"] * df["Diaphragm_on"]
 
     # Select only needed columns
     cols_to_keep = [SAMPLE_CODE_COL, target_col] + features
@@ -457,8 +457,8 @@ def plot_pdp_2d_d20_span(
     # Recompute engineered features consistent with grid_df values
     if "D10^2" in features:
         grid_df["D10^2"] = grid_df["D10"] ** 2
-    if "D10_Span" in features and "D80/D20" in features:
-        grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
+    if "D10_Span_Dia" in features and "D80/D20" in features and "Diaphragm_on" in features:
+        grid_df["D10_Span_Dia"] = grid_df["D10"] * grid_df["D80/D20"] * grid_df["Diaphragm_on"]
     if "D10_Dia" in features and "Diaphragm_on" in features:
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
     if "Span_Dia" in features and "D80/D20" in features and "Diaphragm_on" in features:
@@ -488,15 +488,19 @@ def plot_pdp_2d_d20_span(
         grid_off["Diaphragm_on"] = 0
         grid_off["D10_Dia"] = grid_off["D10"] * grid_off["Diaphragm_on"]
         grid_off["Span_Dia"] = grid_off["D80/D20"] * grid_off["Diaphragm_on"]
-        if "D10_Span" in features:
-            grid_off["D10_Span"] = grid_off["D10"] * grid_off["D80/D20"]
+        if "D10_Span_Dia" in features:
+            grid_off["D10_Span_Dia"] = (
+                grid_off["D10"] * grid_off["D80/D20"] * grid_off["Diaphragm_on"]
+            )
 
         # diaphragm ON
         grid_on["Diaphragm_on"] = 1
         grid_on["D10_Dia"] = grid_on["D10"] * grid_on["Diaphragm_on"]
         grid_on["Span_Dia"] = grid_on["D80/D20"] * grid_on["Diaphragm_on"]
-        if "D10_Span" in features:
-            grid_on["D10_Span"] = grid_on["D10"] * grid_on["D80/D20"]
+        if "D10_Span_Dia" in features:
+            grid_on["D10_Span_Dia"] = (
+                grid_on["D10"] * grid_on["D80/D20"] * grid_on["Diaphragm_on"]
+            )
 
         # Predict FMC (%) for both states
         Z_off = 100 * pipe.predict(grid_off[features].to_numpy(dtype=float)).reshape(ny, nx)
@@ -559,7 +563,7 @@ def plot_pdp_d10_diaphragm(
       - Diaphragm_on = 0
       - Diaphragm_on = 1
 
-    Interaction features (D10_Dia, Span_Dia, D10_Span) are recomputed so they stay
+    Interaction features (D10_Dia, Span_Dia, D10_Span_Dia) are recomputed so they stay
     consistent with the chosen Diaphragm_on and D10.
     """
     required = {"D10", "Diaphragm_on", "D10_Dia", "Span_Dia", "D80/D20"}
@@ -577,8 +581,10 @@ def plot_pdp_d10_diaphragm(
         # recompute interactions correctly using D10
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
-        if "D10_Span" in features:
-            grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
+        if "D10_Span_Dia" in features:
+            grid_df["D10_Span_Dia"] = (
+                grid_df["D10"] * grid_df["D80/D20"] * grid_df["Diaphragm_on"]
+            )
         if "D10^2" in features:
             grid_df["D10^2"] = grid_df["D10"] ** 2
 
@@ -626,8 +632,10 @@ def plot_delta_d10_diaphragm(
         grid_df["Diaphragm_on"] = dia
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
-        if "D10_Span" in features:
-            grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
+        if "D10_Span_Dia" in features:
+            grid_df["D10_Span_Dia"] = (
+                grid_df["D10"] * grid_df["D80/D20"] * grid_df["Diaphragm_on"]
+            )
         if "D10^2" in features:
             grid_df["D10^2"] = grid_df["D10"] ** 2
 
@@ -680,11 +688,13 @@ def plot_delta_dia_tree(
         grid_df = pd.DataFrame([base_row] * n_points)
         grid_df[feature_x] = x_vals
         grid_df["Diaphragm_on"] = dia
-        # D10 stays at mean; D10_Dia uses D10, not D20
+        # D10 stays at mean; D10_Dia uses D10, not feature_x
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
-        if "D10_Span" in features:
-            grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
+        if "D10_Span_Dia" in features:
+            grid_df["D10_Span_Dia"] = (
+                grid_df["D10"] * grid_df["D80/D20"] * grid_df["Diaphragm_on"]
+            )
         if "D10^2" in features:
             grid_df["D10^2"] = grid_df["D10"] ** 2
 
@@ -1078,7 +1088,7 @@ def plot_delta_span_diaphragm(
     Plot ?FMC(Span) = FMC(diaphragm on) - FMC(no diaphragm) vs Span (D80/D20)
     for the LASSO model.
 
-    D10 is held at its mean; Span (D80/D20) is varied and Span_Dia (and D10_Span) are updated.
+    D10 is held at its mean; Span (D80/D20) is varied and Span_Dia and D10_Span_Dia are updated.
     """
     required = {"D80/D20", "Diaphragm_on", "D10_Dia", "Span_Dia", "D10"}
     if not required.issubset(set(features)):
@@ -1098,8 +1108,10 @@ def plot_delta_span_diaphragm(
         # Interactions: Span_Dia uses Span, D10_Dia uses D10 (held at mean)
         grid_df["Span_Dia"] = grid_df["D80/D20"] * grid_df["Diaphragm_on"]
         grid_df["D10_Dia"] = grid_df["D10"] * grid_df["Diaphragm_on"]
-        if "D10_Span" in features:
-            grid_df["D10_Span"] = grid_df["D10"] * grid_df["D80/D20"]
+        if "D10_Span_Dia" in features:
+            grid_df["D10_Span_Dia"] = (
+                grid_df["D10"] * grid_df["D80/D20"] * grid_df["Diaphragm_on"]
+            )
         if "D10^2" in features:
             grid_df["D10^2"] = grid_df["D10"] ** 2
 
@@ -1217,7 +1229,7 @@ def main():
         df_features_train,
         DEFAULT_FEATURE_COLS,
         title="Model Predicted FMC (? 3% diaphragm benefit)",
-        delta_threshold=-3.0,  # diaphragm gives 3% lower FMC
+        delta_threshold=5.0,  # diaphragm gives 3% lower FMC
     )
 
     # Diaphragm effect plots for LASSO (linear model with nonlinear features)

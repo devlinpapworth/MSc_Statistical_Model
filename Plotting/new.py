@@ -1,1386 +1,321 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-from matplotlib.lines import Line2D
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
-from typing import Optional
-import argparse
-import textwrap
+import matplotlib.pyplot as plt
+from sklearn.mixture import GaussianMixture
+from typing import Any, Optional
 
-# Colour map for sample codes
-SAMPLE_COLOUR_MAP = {
-    # P10 = 5 um (blue tones)
-    "Si_5_2":  "#1f77b4",  # medium blue
-    "Si_5_5":  "#0b4f88",  # darker blue
+# ============================================================
+# 1. CONFIG - EDIT THIS PART
+# ============================================================
 
-    # P10 = 25 um (green tones)
-    "Si_25_2": "#2ca02c",  # medium green
-    "Si_25_5": "#1b6b1b",  # darker green
+FILE_PATH = r"C:\Users\devli\OneDrive - Imperial College London\MSci - Devlin (Personal)\Data\FP_db_all.xlsx"
+SHEET_NAME = "PSD_Full"
 
-    # P10 = 45 um (orange / warm tones)
-    "Si_45_2": "#ff7f0e",  # orange
-    "Si_45_5": "#b35400",  # burnt orange
+COL_SAMPLE = "Sample Name"  # column with sample codes/names
 
-    # Other key samples
-    "Si_Rep_new": "#9467bd",  # purple
-    "Si_BM":      "#808080",  # grey
-}
+SAMPLE_CODES = [
+    "Si_BM",
+    "Si_Rep_new",
+    "Si_45_2",
+    "Si_45_5",
+    "Si_25_5",
+    "Si_25_2",
+    "Si_5_2",
+    "Si_5_5",
+]
 
-DEFAULT_OTHER_COLOUR = "#bbbbbb"  # for any sample not in the dict
-SAMPLE_CODE_COL = "Sample Code"   # adjust if your column name differs
+# ============================================================
+# 2. HELPER FUNCTIONS
+# ============================================================
 
-# ---------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------
-
-DEFAULT_XLSX_PATH = r"C:\Users\devli\OneDrive - Imperial College London\MSci - Devlin (Personal)\Data\FP_db_all.xlsx"
-DB_SHEET = "DB_2"
-PSD_SHEET = "PSD"
-
-TARGET_COL = "Mc_%"
-FLAG_COL = "flag"
-TEST_PROC_COL = "Test_procedure"
-
-# PSD cols we need from PSD sheet
-PSD_BASE_COLS = ["D10", "D20", "D50", "D80", "D90"]
-
-
-# ---------------------------------------------------------------------
-# Helpers: load / merge / engineer columns
-# ---------------------------------------------------------------------
-
-def error(msg: str):
-    raise SystemExit(f"\nERROR: {msg}\n")
+def _get_size_columns(df: pd.DataFrame) -> list[str]:
+    """
+    Identify the columns that are the PSD size classes.
+    Assumes all columns that can be converted to float are size columns.
+    """
+    size_cols: list[str] = []
+    for col in df.columns:
+        try:
+            _ = float(str(col))
+            size_cols.append(col)
+        except ValueError:
+            continue
+    if not size_cols:
+        raise ValueError("Could not detect any numeric size-class columns.")
+    size_cols = sorted(size_cols, key=lambda c: float(c))
+    return size_cols
 
 
-def load_sheets(xlsx_path: str, sheet_db: str = DB_SHEET, sheet_psd: str = PSD_SHEET):
-    try:
-        xls = pd.ExcelFile(xlsx_path)
-    except FileNotFoundError:
-        error(f"Excel file not found: {xlsx_path}")
-    except Exception as e:
-        error(f"Failed to open Excel file '{xlsx_path}': {e}")
+def _discrete_pdf_from_row(row: pd.Series, size_cols: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    """
+    From a PSD_Full row, return:
+      d : diameters (\u00B5m)
+      p : normalised probabilities (volume fraction per size class)
+    """
+    d = np.array([float(c) for c in size_cols], dtype=float)
+    y = row[size_cols].astype(float).to_numpy()
+    y = np.nan_to_num(y, nan=0.0)
 
-    if sheet_db not in xls.sheet_names:
-        error(f"DB sheet '{sheet_db}' not found. Sheets: {xls.sheet_names}")
-    if sheet_psd not in xls.sheet_names:
-        error(f"PSD sheet '{sheet_psd}' not found. Sheets: {xls.sheet_names}")
+    total = y.sum()
+    if total <= 0:
+        raise ValueError("PSD row has zero or negative total - cannot normalise.")
 
-    try:
-        df_db = pd.read_excel(xls, sheet_name=sheet_db)
-        df_psd = pd.read_excel(xls, sheet_name=sheet_psd)
-    except Exception as e:
-        error(f"Failed reading sheets: {e}")
-
-    return df_db, df_psd
+    p = y / total
+    return d, p
 
 
-def apply_flag_filter(df_db: pd.DataFrame) -> pd.DataFrame:
-    if FLAG_COL not in df_db.columns:
-        error(f"Flag column '{FLAG_COL}' missing in DB sheet.")
+def _fit_gmm_logspace(
+    d: np.ndarray,
+    p: np.ndarray,
+    max_components: int = 3,
+    min_effective_weight: float = 0.05,
+) -> dict[str, Any]:
+    """
+    Fit Gaussian Mixture Model(s) in log10(d) space WITHOUT sample_weight
+    (for older sklearn). We emulate weights by repeating each point according
+    to its probability p.
 
-    mask = df_db[FLAG_COL].astype(str).str.contains("include", case=False, na=False)
-    df = df_db.loc[mask].copy()
-    if df.empty:
-        error("No rows remain after flag filter ('include').")
-    return df
+    Also computes an 'effective' number of modes (K_eff) by ignoring very
+    low-weight components, and Ashman D between the two dominant modes if
+    K_eff >= 2.
+
+    Returns keys:
+      K           : BIC-selected component count
+      means_log10 : all component means in log10(d)
+      stds_log10  : all component std devs
+      weights     : all component weights
+      K_eff       : effective number of modes (after weight threshold)
+      eff_means_log10 : means of effective modes
+      eff_weights     : weights of effective modes
+      ashman_D_main   : Ashman D between two dominant effective modes (log10 space), or NaN
+    """
+    x_base = np.log10(d).reshape(-1, 1)
+    w = p / p.sum()
+
+    # Expand x according to weights so total number of points is reasonable
+    total_points = 2000
+    counts = np.maximum(1, np.round(w * total_points).astype(int))
+    x_expanded = np.repeat(x_base, counts, axis=0)
+
+    best_bic = np.inf
+    best_k = 1
+    best_model: Optional[GaussianMixture] = None
+
+    for k in range(1, max_components + 1):
+        gmm = GaussianMixture(
+            n_components=k,
+            covariance_type='full',
+            random_state=42,
+        )
+        gmm.fit(x_expanded)
+        bic = gmm.bic(x_expanded)
+        if bic < best_bic:
+            best_bic = bic
+            best_k = k
+            best_model = gmm
+
+    if best_model is None:
+        raise RuntimeError("GMM fitting failed for all component counts.")
+
+    means_log10 = best_model.means_.flatten()
+    stds_log10 = np.sqrt(best_model.covariances_.flatten())
+    weights = best_model.weights_
+
+    # --- Effective modes: ignore tiny weights ---
+    # Sort by weight descending
+    idx_sort = np.argsort(weights)[::-1]
+    means_sorted = means_log10[idx_sort]
+    stds_sorted = stds_log10[idx_sort]
+    weights_sorted = weights[idx_sort]
+
+    mask_eff = weights_sorted >= min_effective_weight
+    eff_means = means_sorted[mask_eff]
+    eff_stds = stds_sorted[mask_eff]
+    eff_weights = weights_sorted[mask_eff]
+
+    K_eff = eff_means.size
+
+    # --- Ashman D between two dominant effective modes (if at least 2) ---
+    if K_eff >= 2:
+        mu1, mu2 = eff_means[:2]
+        s1, s2 = eff_stds[:2]
+        ashman_D_main = np.abs(mu1 - mu2) / np.sqrt(s1 ** 2 + s2 ** 2)
+    else:
+        ashman_D_main = np.nan
+
+    return {
+        "K": best_k,
+        "means_log10": means_log10,
+        "stds_log10": stds_log10,
+        "weights": weights,
+        "K_eff": K_eff,
+        "eff_means_log10": eff_means,
+        "eff_weights": eff_weights,
+        "ashman_D_main": ashman_D_main,
+    }
 
 
-def merge_db_psd_empirical(
-    df_db: pd.DataFrame,
-    df_psd: pd.DataFrame,
+def _lognormal_pdf_mixture(d: np.ndarray,
+                           means_log10: np.ndarray,
+                           stds_log10: np.ndarray,
+                           weights: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Evaluate the lognormal mixture PDF on a diameter grid d.
+    We treat the GMM as Gaussian in log10(d), convert to ln(d), and
+    use the lognormal PDF in d-space.
+    """
+    d = np.asarray(d, dtype=float)
+    # Avoid zero or negative values
+    d[d <= 0] = np.min(d[d > 0])
+
+    # Convert log10 parameters to natural log parameters
+    ln10 = np.log(10.0)
+    mu_ln = means_log10 * ln10
+    sigma_ln = stds_log10 * ln10
+
+    pdf_components = []
+    for mu, sigma, w in zip(mu_ln, sigma_ln, weights):
+        # Lognormal pdf
+        comp = (w / (d * sigma * np.sqrt(2.0 * np.pi))) * np.exp(
+            - (np.log(d) - mu) ** 2 / (2.0 * sigma ** 2)
+        )
+        pdf_components.append(comp)
+
+    pdf_components = np.array(pdf_components)   # shape (K, len(d))
+    mixture_pdf = pdf_components.sum(axis=0)    # sum over components
+
+    return mixture_pdf, pdf_components
+
+
+def _plot_psd_and_gmm(sample_name: str,
+                      d: np.ndarray,
+                      p: np.ndarray,
+                      gmm_info: dict[str, Any]) -> None:
+    """
+    Plot discrete PSD and fitted GMM (mixture + components) for a sample.
+    """
+    # Grid for smooth curve
+    d_grid = np.logspace(np.log10(d.min()), np.log10(d.max()), 400)
+
+    mix_pdf, comp_pdfs = _lognormal_pdf_mixture(
+        d_grid,
+        gmm_info["means_log10"],
+        gmm_info["stds_log10"],
+        gmm_info["weights"],
+    )
+
+    # Scale mixture to roughly match the discrete PDF peak for visual comparison
+    scale = p.max() / mix_pdf.max() if mix_pdf.max() > 0 else 1.0
+    mix_pdf_scaled = mix_pdf * scale
+    comp_pdfs_scaled = comp_pdfs * scale
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    # Discrete PSD points
+    ax.scatter(d, p, color="k", s=25, label="Discrete PSD (per bin)")
+
+    # Mixture curve
+    ax.plot(d_grid, mix_pdf_scaled, label=f"GMM mixture (K={gmm_info['K']})")
+
+    # Individual components
+    for i, comp in enumerate(comp_pdfs_scaled):
+        ax.plot(d_grid, comp, linestyle="--", alpha=0.7, label=f"Mode {i+1}")
+
+    ax.set_xscale("log")
+    ax.set_xlabel("Particle size d (\u00B5m)")
+    ax.set_ylabel("Relative density (scaled)")
+    ax.grid(True, which="both", alpha=0.3)
+
+    title = (
+        f"{sample_name} | K_raw={gmm_info['K']} "
+        f"| K_eff={gmm_info.get('K_eff', gmm_info['K'])} "
+        f"| Ashman D (log10)={gmm_info.get('ashman_D_main', float('nan')):.2f}"
+    )
+    ax.set_title(title)
+
+    ax.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    plt.show()
+
+
+
+# ============================================================
+# 3. MAIN DRIVER
+# ============================================================
+
+def run_gmm_psd_analysis(
+    file_path: str = FILE_PATH,
+    sheet_name: str = SHEET_NAME,
+    sample_codes: list[str] = SAMPLE_CODES,
 ) -> pd.DataFrame:
-    """Merge DB_2 and PSD and compute only what we need for empirical plots."""
-    # basic checks
-    needed_db = {SAMPLE_CODE_COL, TARGET_COL, FLAG_COL, TEST_PROC_COL}
-    if not needed_db.issubset(df_db.columns):
-        error(f"DB sheet missing required columns: {needed_db - set(df_db.columns)}")
-
-    if SAMPLE_CODE_COL not in df_psd.columns:
-        error(f"PSD sheet missing '{SAMPLE_CODE_COL}' column.")
-    for c in PSD_BASE_COLS:
-        if c not in df_psd.columns:
-            error(f"PSD sheet missing required PSD column '{c}'.")
-
-    df = pd.merge(df_db, df_psd, on=SAMPLE_CODE_COL, how="inner")
-    if df.empty:
-        error("Merge between DB and PSD sheets is empty. Check sample codes.")
-
-    # convert base D-values to numeric
-    for col in PSD_BASE_COLS:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # span
-    df["D80/D20"] = df["D80"] / df["D20"]
-
-    # diaphragm flag from Test_procedure
-    df["Diaphragm_on"] = df[TEST_PROC_COL].astype(str).str.contains(
-        "STD", case=False, na=False
-    ).astype(int)
-
-    # keep only rows with all needed columns
-    needed_cols = ["D10", "D80/D20", "Diaphragm_on", TARGET_COL]
-    missing_mask = df[needed_cols].isna().any(axis=1)
-
-    if missing_mask.any():
-        print("\nWarning: dropped rows due to NaNs in empirical merge:")
-        print(df.loc[missing_mask, [SAMPLE_CODE_COL] + needed_cols])
-        print("--- end dropped rows ---\n")
-
-    df_clean = df.loc[~missing_mask].copy()
-    if df_clean.empty:
-        error("All rows dropped due to missing values in empirical fields.")
-
-    return df_clean
-
-
-# ---------------------------------------------------------------------
-# Plot 1: Interaction D10 × diaphragm_on (means)
-# ---------------------------------------------------------------------
-
-def plot_interaction_d10_diaphragm(
-    df: pd.DataFrame,
-    target_col: str = TARGET_COL,
-    n_bins: int = 3,
-    title: str = "Interaction: D10 vs diaphragm (empirical means)",
-    save_path: Optional[str] = None,
-):
-    required = {"D10", "Diaphragm_on", target_col}
-    if not required.issubset(df.columns):
-        error(f"DataFrame must contain: {required}")
-
-    data = df[["D10", "Diaphragm_on", target_col]].dropna().copy()
-    data["Mc_pct"] = 100 * data[target_col]
-
-    d10_min, d10_max = data["D10"].min(), data["D10"].max()
-    bins = np.linspace(d10_min, d10_max, n_bins + 1)
-    data["D10_bin"] = pd.cut(data["D10"], bins=bins, include_lowest=True)
-
-    grouped = (
-        data
-        .groupby(["D10_bin", "Diaphragm_on"])
-        .agg(
-            D10_mean=("D10", "mean"),
-            Mc_mean=("Mc_pct", "mean"),
-            n=("Mc_pct", "size"),
-        )
-        .reset_index()
-    )
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-
-    for dia_val, label in [(0, "No diaphragm"), (1, "Diaphragm on")]:
-        subset = grouped[grouped["Diaphragm_on"] == dia_val]
-        if subset.empty:
-            continue
-        ax.plot(
-            subset["D10_mean"],
-            subset["Mc_mean"],
-            marker="o",
-            linewidth=2,
-            label=label,
-        )
-
-    ax.set_xlabel("D10 (\u00B5m)")
-    ax.set_ylabel("Mean FMC (%)")
-    ax.set_title(title)
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-
-    plt.tight_layout()
-    if save_path:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-# ---------------------------------------------------------------------
-# Plot 2: Interaction Span × diaphragm_on (means)
-# ---------------------------------------------------------------------
-
-def plot_interaction_span_diaphragm(
-    df: pd.DataFrame,
-    target_col: str = TARGET_COL,
-    n_bins: int = 3,
-    title: str = "Interaction: Span vs diaphragm (empirical means)",
-    save_path: Optional[str] = None,
-):
-    required = {"D80/D20", "Diaphragm_on", target_col}
-    if not required.issubset(df.columns):
-        error(f"DataFrame must contain: {required}")
-
-    data = df[["D80/D20", "Diaphragm_on", target_col]].dropna().copy()
-    data["Mc_pct"] = 100 * data[target_col]
-
-    span_min, span_max = data["D80/D20"].min(), data["D80/D20"].max()
-    bins = np.linspace(span_min, span_max, n_bins + 1)
-    data["Span_bin"] = pd.cut(data["D80/D20"], bins=bins, include_lowest=True)
-
-    grouped = (
-        data
-        .groupby(["Span_bin", "Diaphragm_on"])
-        .agg(
-            Span_mean=("D80/D20", "mean"),
-            Mc_mean=("Mc_pct", "mean"),
-            n=("Mc_pct", "size"),
-        )
-        .reset_index()
-    )
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-
-    for dia_val, label in [(0, "No diaphragm"), (1, "Diaphragm on")]:
-        subset = grouped[grouped["Diaphragm_on"] == dia_val]
-        if subset.empty:
-            continue
-        ax.plot(
-            subset["Span_mean"],
-            subset["Mc_mean"],
-            marker="o",
-            linewidth=2,
-            label=label,
-        )
-
-    ax.set_xlabel("Span (D80/D20)")
-    ax.set_ylabel("Mean FMC (%)")
-    ax.set_title(title)
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-
-    plt.tight_layout()
-    if save_path:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-# ---------------------------------------------------------------------
-# Plot 3: Boxplots - FMC by D10 class & diaphragm
-# ---------------------------------------------------------------------
-
-def plot_boxplot_d10_classes(
-    df: pd.DataFrame,
-    target_col: str = TARGET_COL,
-    n_bins: int = 3,
-    title: str = "FMC by D10 class and diaphragm state",
-    save_path: Optional[str] = None,
-):
-    required = {"D10", "Diaphragm_on", target_col}
-    if not required.issubset(df.columns):
-        error(f"DataFrame must contain: {required}")
-
-    data = df[["D10", "Diaphragm_on", target_col]].dropna().copy()
-    data["Mc_pct"] = 100 * data[target_col]
-
-    d10_min, d10_max = data["D10"].min(), data["D10"].max()
-    bins = np.linspace(d10_min, d10_max, n_bins + 1)
-    labels = [f"{b1:.1f}-{b2:.1f}" for b1, b2 in zip(bins[:-1], bins[1:])]
-    data["D10_class"] = pd.cut(data["D10"], bins=bins, labels=labels, include_lowest=True)
-
-    box_data = []
-    box_labels = []
-
-    for cls in labels:
-        for dia_val, dia_label in [(0, "Off"), (1, "On")]:
-            subset = data[(data["D10_class"] == cls) & (data["Diaphragm_on"] == dia_val)]
-            if not subset.empty:
-                box_data.append(subset["Mc_pct"])
-                box_labels.append(f"{cls}\nDia {dia_label}")
-
-    if not box_data:
-        print("No data available for boxplot after classing; skipping.")
-        return
-
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.boxplot(box_data, tick_labels=box_labels, showfliers=True)
-    ax.set_ylabel("FMC (%)")
-    ax.set_title(title)
-    ax.grid(True, axis="y", alpha=0.3)
-
-    plt.tight_layout()
-    if save_path:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-# ---------------------------------------------------------------------
-# Plot 4: Scatter D10 vs Span coloured by FMC (grouped)
-# ---------------------------------------------------------------------
-
-def plot_d10_span_scatter(
-    df: pd.DataFrame,
-    target_col: str = TARGET_COL,
-    title: str = "D10 vs Span coloured by FMC (empirical)",
-    save_path: Optional[str] = None,
-):
-    required = {"D10", "D80/D20", "Diaphragm_on", target_col}
-    if not required.issubset(df.columns):
-        error(f"DataFrame must contain: {required}")
-
-    data = df[["D10", "D80/D20", "Diaphragm_on", target_col]].dropna().copy()
-    data["Mc_pct"] = 100 * data[target_col]
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-
-    for dia_val, marker, label in [(0, "o", "No diaphragm"), (1, "s", "Diaphragm on")]:
-        subset = data[data["Diaphragm_on"] == dia_val]
-        if subset.empty:
-            continue
-        sc = ax.scatter(
-            subset["D10"],
-            subset["D80/D20"],
-            c=subset["Mc_pct"],
-            marker=marker,
-            edgecolors="k",
-            cmap="viridis",
-            alpha=0.85,
-            label=label,
-        )
-
-    cbar = plt.colorbar(sc, ax=ax)
-    cbar.set_label("FMC (%)")
-
-    ax.set_xlabel("D10 (\u00B5m)")
-    ax.set_ylabel("Span (D80/D20)")
-    ax.set_title(title)
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-
-    plt.tight_layout()
-    if save_path:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-# ---------------------------------------------------------------------
-# Plot 4b: Scatter D10 vs Span coloured by FMC - all points & split
-# ---------------------------------------------------------------------
-
-def plot_allpoints_d10_vs_span(
-    df: pd.DataFrame,
-    target_col: str = TARGET_COL,
-    title: str = "D10 vs Span coloured by FMC (all data)",
-    save_path: Optional[str] = None,
-):
-    """
-    Plots ALL experimental datapoints:
-        - X = D10 (with jitter)
-        - Y = Span (D80/D20) (with jitter)
-        - Colour = FMC (%)
-        - Marker shape = diaphragm on/off
-    """
-    required = {"D10", "D80/D20", "Diaphragm_on", target_col}
-    if not required.issubset(df.columns):
-        raise ValueError(f"Dataframe must contain columns: {required}")
-
-    df_plot = df.copy()
-    df_plot["Mc_pct"] = 100 * df_plot[target_col]
-
-    jitter_scale_x = 0.15
-    jitter_scale_y = 0.05
-
-    df_plot["D10_j"] = df_plot["D10"] + np.random.normal(0, jitter_scale_x, len(df_plot))
-    df_plot["Span_j"] = df_plot["D80/D20"] + np.random.normal(0, jitter_scale_y, len(df_plot))
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    df0 = df_plot[df_plot["Diaphragm_on"] == 0]
-    sc0 = ax.scatter(
-        df0["D10_j"],
-        df0["Span_j"],
-        c=df0["Mc_pct"],
-        cmap="viridis",
-        marker="o",
-        edgecolors="k",
-        s=70,
-        label="No diaphragm",
-    )
-
-    df1 = df_plot[df_plot["Diaphragm_on"] == 1]
-    sc1 = ax.scatter(
-        df1["D10_j"],
-        df1["Span_j"],
-        c=df1["Mc_pct"],
-        cmap="viridis",
-        marker="s",
-        edgecolors="k",
-        s=70,
-        label="Diaphragm on",
-    )
-
-    cbar = plt.colorbar(sc1, ax=ax)
-    cbar.set_label("FMC (%)")
-
-    ax.set_xlabel("D10 (\u00B5m)")
-    ax.set_ylabel("Span (D80/D20)")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-    ax.legend()
-
-    plt.tight_layout()
-
-    if save_path:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
-
-    plt.show()
-
-
-def plot_allpoints_d10_vs_span_separated(
-    df: pd.DataFrame,
-    target_col: str = TARGET_COL,
-    title_base: str = "D10 vs Span coloured by FMC",
-    save_path_base: Optional[str] = None,
-):
-    """
-    Creates TWO separate scatter plots:
-        1) Only diaphragm OFF
-        2) Only diaphragm ON
-    """
-    required = {"D10", "D80/D20", "Diaphragm_on", target_col}
-    if not required.issubset(df.columns):
-        raise ValueError(f"DataFrame must contain columns: {required}")
-
-    df_plot = df.copy()
-    df_plot["Mc_pct"] = 100 * df_plot[target_col]
-
-    jitter_x = 0.15
-    jitter_y = 0.05
-    df_plot["D10_j"] = df_plot["D10"] + np.random.normal(0, jitter_x, len(df_plot))
-    df_plot["Span_j"] = df_plot["D80/D20"] + np.random.normal(0, jitter_y, len(df_plot))
-
-    df0 = df_plot[df_plot["Diaphragm_on"] == 0]
-    df1 = df_plot[df_plot["Diaphragm_on"] == 1]
-
-    d10_min, d10_max = df_plot["D10"].min(), df_plot["D10"].max()
-    span_min, span_max = df_plot["D80/D20"].min(), df_plot["D80/D20"].max()
-
-    # Figure 1 — No diaphragm
-    fig0, ax0 = plt.subplots(figsize=(7, 5))
-    sc0 = ax0.scatter(
-        df0["D10_j"],
-        df0["Span_j"],
-        c=df0["Mc_pct"],
-        cmap="viridis",
-        marker="o",
-        edgecolors="k",
-        s=70,
-    )
-    cbar0 = plt.colorbar(sc0, ax=ax0)
-    cbar0.set_label("FMC (%)")
-
-    ax0.set_xlabel("D10 (\u00B5m)")
-    ax0.set_ylabel("Span (D80/D20)")
-    ax0.set_title(f"{title_base} - No Diaphragm")
-    ax0.set_xlim(d10_min - 1, d10_max + 1)
-    ax0.set_ylim(span_min - 0.5, span_max + 0.5)
-    ax0.grid(alpha=0.3)
-
-    plt.tight_layout()
-    if save_path_base:
-        fig0.savefig(save_path_base + "_no_diaphragm.png", dpi=300, bbox_inches="tight")
-
-    plt.show()
-
-    # Figure 2 — Diaphragm on
-    fig1, ax1 = plt.subplots(figsize=(7, 5))
-    sc1 = ax1.scatter(
-        df1["D10_j"],
-        df1["Span_j"],
-        c=df1["Mc_pct"],
-        cmap="viridis",
-        marker="s",
-        edgecolors="k",
-        s=70,
-    )
-    cbar1 = plt.colorbar(sc1, ax=ax1)
-    cbar1.set_label("FMC (%)")
-
-    ax1.set_xlabel("D10 (\u00B5m)")
-    ax1.set_ylabel("Span (D80/D20)")
-    ax1.set_title(f"{title_base} - Diaphragm On")
-    ax1.set_xlim(d10_min - 1, d10_max + 1)
-    ax1.set_ylim(span_min - 0.5, span_max + 0.5)
-    ax1.grid(alpha=0.3)
-
-    plt.tight_layout()
-    if save_path_base:
-        fig1.savefig(save_path_base + "_diaphragm_on.png", dpi=300, bbox_inches="tight")
-
-    plt.show()
-
-
-# ---------------------------------------------------------------------
-# Pumping time vs D10 / Span (coloured by Sample Code)
-# ---------------------------------------------------------------------
-def _get_numeric_1d(col):
-    """
-    Ensure we always end up with a 1D numeric Series,
-    even if 'col' is actually a DataFrame with duplicate names.
-    """
-    if isinstance(col, pd.DataFrame):
-        # take the first physical column if there are duplicates
-        ser = col.iloc[:, 0]
-    else:
-        ser = col
-    return pd.to_numeric(ser, errors="coerce")
-
-
-def plot_FT_vs_D10(df: pd.DataFrame,
-                   title: str = "Pumping time vs D10",
-                   save_path: Optional[str] = None):
-    """
-    Pumping time F_T vs D10.
-    Colour by sample code, quadratic trend line.
-    Legend labels = Span (D80/D20) for each sample.
-    """
-    required = {"D10", "D80/D20", "F_T", SAMPLE_CODE_COL}
-    if not required.issubset(df.columns):
-        raise ValueError(f"DataFrame must contain: {required}")
-
-    df_plot = df[list(required)].copy()
-
-    # 1D numeric columns
-    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
-    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
-    df_plot["F_T"] = _get_numeric_1d(df_plot["F_T"])
-
-    df_plot = df_plot.dropna(subset=["D10", "F_T", "D80/D20"])
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-
-    colours = df_plot[SAMPLE_CODE_COL].map(SAMPLE_COLOUR_MAP).fillna(DEFAULT_OTHER_COLOUR)
-
-    ax.scatter(
-        df_plot["D10"].to_numpy(),
-        df_plot["F_T"].to_numpy(),
-        marker="o",
-        edgecolors="k",
-        alpha=0.85,
-        s=70,
-        c=list(colours),
-    )
-
-    # quadratic trend
-    x = df_plot["D10"].to_numpy(dtype=float)
-    y = df_plot["F_T"].to_numpy(dtype=float)
-    if len(x) >= 3:
-        coeffs = np.polyfit(x, y, deg=2)
-        x_fit = np.linspace(x.min(), x.max(), 200)
-        y_fit = np.polyval(coeffs, x_fit)
-        ax.plot(x_fit, y_fit, color="black", linewidth=2,
-                linestyle="--", label="Trend")
-
-    ax.set_xlabel("D10 (\u00B5m)")
-    ax.set_ylabel("Pumping time (s)")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-
-    # force axes to start at zero
-    ax.set_xlim(left=0)
-    ax.set_ylim(bottom=0)
-
-    # legend: label by Span (mean D80/D20 per sample)
-    span_by_code = (
-        df_plot
-        .groupby(SAMPLE_CODE_COL)["D80/D20"]
-        .mean()
-    )
-
-    legend_handles = []
-    for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-        span_val = span_by_code.loc[code]
-        label = f"Span={span_val:.2f}"
-        legend_handles.append(
-            Line2D([0], [0], marker="o", color="none",
-                   markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=label)
-        )
-    if len(x) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend")
-        )
-
-    ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
-              loc="upper left", borderaxespad=0.)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-def plot_FT_vs_Span(df: pd.DataFrame,
-                    title: str = "Pumping time vs Span",
-                    save_path: Optional[str] = None):
-    """
-    Pumping time F_T vs Span (D80/D20).
-    Colour by sample code, quadratic trend line.
-    Legend labels = D10 for each sample.
-    """
-    required = {"D80/D20", "D10", "F_T", SAMPLE_CODE_COL}
-    if not required.issubset(df.columns):
-        raise ValueError(f"DataFrame must contain: {required}")
-
-    df_plot = df[list(required)].copy()
-
-    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
-    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
-    df_plot["F_T"] = _get_numeric_1d(df_plot["F_T"])
-
-    df_plot = df_plot.dropna(subset=["D80/D20", "F_T", "D10"])
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-
-    colours = df_plot[SAMPLE_CODE_COL].map(SAMPLE_COLOUR_MAP).fillna(DEFAULT_OTHER_COLOUR)
-
-    ax.scatter(
-        df_plot["D80/D20"].to_numpy(),
-        df_plot["F_T"].to_numpy(),
-        marker="o",
-        edgecolors="k",
-        alpha=0.85,
-        s=70,
-        c=list(colours),
-    )
-
-    x = df_plot["D80/D20"].to_numpy(dtype=float)
-    y = df_plot["F_T"].to_numpy(dtype=float)
-    if len(x) >= 3:
-        coeffs = np.polyfit(x, y, deg=2)
-        x_fit = np.linspace(x.min(), x.max(), 200)
-        y_fit = np.polyval(coeffs, x_fit)
-        ax.plot(x_fit, y_fit, color="black", linewidth=2,
-                linestyle="--", label="Trend")
-
-    ax.set_xlabel("Span (D80/D20)")
-    ax.set_ylabel("Pumping time (s)")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-
-    # force axes to start at zero
-    ax.set_xlim(left=0)
-    ax.set_ylim(bottom=0)
-
-    # legend: label by D10 (mean per sample)
-    d10_by_code = (
-        df_plot
-        .groupby(SAMPLE_CODE_COL)["D10"]
-        .mean()
-    )
-
-    legend_handles = []
-    for code in sorted(df_plot[SAMPLE_CODE_COL].unique()):
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-        d10_val = d10_by_code.loc[code]
-        label = f"D10={d10_val:.1f} \u00B5m"
-        legend_handles.append(
-            Line2D([0], [0], marker="o", color="none",
-                   markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=label)
-        )
-    if len(x) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend")
-        )
-
-    ax.legend(handles=legend_handles, bbox_to_anchor=(1.02, 1),
-              loc="upper left", borderaxespad=0.)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-def plot_AT_vs_D10(df: pd.DataFrame,
-                   title: str = "Air-blow time vs D10",
-                   save_path: Optional[str] = None):
-    """
-    Air-blow time vs D10.
-    Uses mean D10 / A_T per sample & diaphragm state.
-    Legend labels = Span (D80/D20) per sample.
-    Marker shape encodes diaphragm state:
-        circle = diaphragm on (1)
-        triangle = diaphragm off (0)
-    Separate quadratic trends for dia on/off.
-    """
-    required = {"D10", "D80/D20", "A_T", SAMPLE_CODE_COL, "Diaphragm_on"}
-    if not required.issubset(df.columns):
-        raise ValueError(f"DataFrame must contain: {required}")
-
-    df_plot = df[list(required)].copy()
-
-    # numeric columns
-    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
-    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
-    df_plot["A_T"] = _get_numeric_1d(df_plot["A_T"])
-    df_plot = df_plot.dropna(subset=["D10", "A_T", "D80/D20"])
-
-    # ----- diaphragm effect per sample (mean dia on/off) -----
-    stats = (
-        df_plot
-        .groupby([SAMPLE_CODE_COL, "Diaphragm_on"])
-        .agg(D10_mean=("D10", "mean"),
-             Span_mean=("D80/D20", "mean"),
-             AT_mean=("A_T", "mean"))
-        .reset_index()
-    )
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-
-    # scatter means only, marker by diaphragm state
-    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
-        sub = stats[stats[SAMPLE_CODE_COL] == code]
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-
-        for _, row in sub.iterrows():
-            marker = "o" if row["Diaphragm_on"] == 1 else "^"
-            ax.scatter(
-                row["D10_mean"],
-                row["AT_mean"],
-                marker=marker,
-                edgecolors="k",
-                alpha=0.9,
-                s=70,
-                c=[colour],
-            )
-
-        # vertical connector line (dia effect) if both states exist
-        if {0, 1}.issubset(set(sub["Diaphragm_on"])):
-            d10_mean = sub["D10_mean"].mean()
-            y0 = sub.loc[sub["Diaphragm_on"] == 0, "AT_mean"].iloc[0]
-            y1 = sub.loc[sub["Diaphragm_on"] == 1, "AT_mean"].iloc[0]
-
-            ax.plot(
-                [d10_mean, d10_mean],
-                [y0, y1],
-                color="grey",
-                linewidth=2,
-                alpha=0.8,
-            )
-
-            print(f"{code}: ?Time (dia - no dia) = {y1 - y0:.2f} s")
-
-    # ----- trend lines (quadratic, based on means for each dia state) -----
-    stats_on = stats[stats["Diaphragm_on"] == 1]
-    stats_off = stats[stats["Diaphragm_on"] == 0]
-
-    # dia ON
-    if len(stats_on) >= 3:
-        x_on = stats_on["D10_mean"].to_numpy(dtype=float)
-        y_on = stats_on["AT_mean"].to_numpy(dtype=float)
-        coeffs_on = np.polyfit(x_on, y_on, deg=2)
-        x_fit_on = np.linspace(x_on.min(), x_on.max(), 200)
-        y_fit_on = np.polyval(coeffs_on, x_fit_on)
-        ax.plot(x_fit_on, y_fit_on,
-                color="black", linewidth=2, linestyle="--",
-                label="Trend (Dia on)")
-
-    # dia OFF
-    if len(stats_off) >= 3:
-        x_off = stats_off["D10_mean"].to_numpy(dtype=float)
-        y_off = stats_off["AT_mean"].to_numpy(dtype=float)
-        coeffs_off = np.polyfit(x_off, y_off, deg=2)
-        x_fit_off = np.linspace(x_off.min(), x_off.max(), 200)
-        y_fit_off = np.polyval(coeffs_off, x_fit_off)
-        ax.plot(x_fit_off, y_fit_off,
-                color="black", linewidth=2, linestyle=":",
-                label="Trend (Dia off)")
-
-    ax.set_xlabel("D10 (\u00B5m)")
-    ax.set_ylabel("Air-blow time (s)")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-
-    # force axes to start at zero
-    ax.set_xlim(left=0)
-    ax.set_ylim(bottom=0)
-
-    # legend: label by Span (mean Span per sample)
-    span_by_code = (
-        stats
-        .groupby(SAMPLE_CODE_COL)["Span_mean"]
-        .mean()
-    )
-
-    legend_handles = []
-    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-        span_val = span_by_code.loc[code]
-        label = f"Span={span_val:.2f}"
-        legend_handles.append(
-            Line2D([0], [0], marker="o", color="none",
-                   markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=label)
-        )
-
-    # marker-shape legend for diaphragm state
-    dia_on_handle = Line2D([0], [0], marker="o", color="none",
-                           markerfacecolor="lightgrey", markeredgecolor="k",
-                           markersize=7, label="Dia on")
-    dia_off_handle = Line2D([0], [0], marker="^", color="none",
-                            markerfacecolor="lightgrey", markeredgecolor="k",
-                            markersize=7, label="Dia off")
-    legend_handles.extend([dia_on_handle, dia_off_handle])
-
-    # trend line legend (only if present)
-    if len(stats_on) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend (Dia on)")
-        )
-    if len(stats_off) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle=":",
-                   label="Trend (Dia off)")
-        )
-
-    ax.legend(handles=legend_handles,
-              bbox_to_anchor=(1.02, 1),
-              loc="upper left", borderaxespad=0.)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-
-def plot_AT_vs_Span(df: pd.DataFrame,
-                    title: str = "Air-blow time vs Span",
-                    save_path: Optional[str] = None):
-    """
-    Air-blow time vs Span (D80/D20).
-    Uses mean Span / A_T per sample & diaphragm state.
-    Legend labels = D10 per sample.
-    Marker shape encodes diaphragm state:
-        circle = diaphragm on (1)
-        triangle = diaphragm off (0)
-    Separate quadratic trends for dia on/off.
-    """
-    required = {"D80/D20", "D10", "A_T", SAMPLE_CODE_COL, "Diaphragm_on"}
-    if not required.issubset(df.columns):
-        raise ValueError(f"DataFrame must contain: {required}")
-
-    df_plot = df[list(required)].copy()
-
-    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
-    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
-    df_plot["A_T"] = _get_numeric_1d(df_plot["A_T"])
-    df_plot = df_plot.dropna(subset=["D80/D20", "A_T", "D10"])
-
-    # ----- diaphragm effect per sample (mean dia on/off) -----
-    stats = (
-        df_plot
-        .groupby([SAMPLE_CODE_COL, "Diaphragm_on"])
-        .agg(Span_mean=("D80/D20", "mean"),
-             D10_mean=("D10", "mean"),
-             AT_mean=("A_T", "mean"))
-        .reset_index()
-    )
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-
-    # scatter means only, marker by diaphragm state
-    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
-        sub = stats[stats[SAMPLE_CODE_COL] == code]
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-
-        for _, row in sub.iterrows():
-            marker = "o" if row["Diaphragm_on"] == 1 else "^"
-            ax.scatter(
-                row["Span_mean"],
-                row["AT_mean"],
-                marker=marker,
-                edgecolors="k",
-                alpha=0.9,
-                s=70,
-                c=[colour],
-            )
-
-        # vertical connector line (dia effect) if both states exist
-        if {0, 1}.issubset(set(sub["Diaphragm_on"])):
-            span_mean = sub["Span_mean"].mean()
-            y0 = sub.loc[sub["Diaphragm_on"] == 0, "AT_mean"].iloc[0]
-            y1 = sub.loc[sub["Diaphragm_on"] == 1, "AT_mean"].iloc[0]
-
-            ax.plot(
-                [span_mean, span_mean],
-                [y0, y1],
-                color="grey",
-                linewidth=2,
-                alpha=0.8,
-            )
-
-            print(f"{code}: ?Time (dia - no dia) = {y1 - y0:.2f} s")
-
-    # ----- trend lines (quadratic, based on means for each dia state) -----
-    stats_on = stats[stats["Diaphragm_on"] == 1]
-    stats_off = stats[stats["Diaphragm_on"] == 0]
-
-    # dia ON
-    if len(stats_on) >= 3:
-        x_on = stats_on["Span_mean"].to_numpy(dtype=float)
-        y_on = stats_on["AT_mean"].to_numpy(dtype=float)
-        coeffs_on = np.polyfit(x_on, y_on, deg=2)
-        x_fit_on = np.linspace(x_on.min(), x_on.max(), 200)
-        y_fit_on = np.polyval(coeffs_on, x_fit_on)
-        ax.plot(x_fit_on, y_fit_on,
-                color="black", linewidth=2, linestyle="--",
-                label="Trend (Dia on)")
-
-    # dia OFF
-    if len(stats_off) >= 3:
-        x_off = stats_off["Span_mean"].to_numpy(dtype=float)
-        y_off = stats_off["AT_mean"].to_numpy(dtype=float)
-        coeffs_off = np.polyfit(x_off, y_off, deg=2)
-        x_fit_off = np.linspace(x_off.min(), x_off.max(), 200)
-        y_fit_off = np.polyval(coeffs_off, x_fit_off)
-        ax.plot(x_fit_off, y_fit_off,
-                color="black", linewidth=2, linestyle=":",
-                label="Trend (Dia off)")
-
-    ax.set_xlabel("Span (D80/D20)")
-    ax.set_ylabel("Air-blow time (s)")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-
-    # force axes to start at zero
-    ax.set_xlim(left=0)
-    ax.set_ylim(bottom=0)
-
-    # legend: label by D10 (mean per sample)
-    d10_by_code = (
-        stats
-        .groupby(SAMPLE_CODE_COL)["D10_mean"]
-        .mean()
-    )
-
-    legend_handles = []
-    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-        d10_val = d10_by_code.loc[code]
-        label = f"D10={d10_val:.1f} \u00B5m"
-        legend_handles.append(
-            Line2D([0], [0], marker="o", color="none",
-                   markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=label)
-        )
-
-    # marker-shape legend for diaphragm state
-    dia_on_handle = Line2D([0], [0], marker="o", color="none",
-                           markerfacecolor="lightgrey", markeredgecolor="k",
-                           markersize=7, label="Dia on")
-    dia_off_handle = Line2D([0], [0], marker="^", color="none",
-                            markerfacecolor="lightgrey", markeredgecolor="k",
-                            markersize=7, label="Dia off")
-    legend_handles.extend([dia_on_handle, dia_off_handle])
-
-    # trend legend
-    if len(stats_on) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend (Dia on)")
-        )
-    if len(stats_off) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle=":",
-                   label="Trend (Dia off)")
-        )
-
-    ax.legend(handles=legend_handles,
-              bbox_to_anchor=(1.02, 1),
-              loc="upper left", borderaxespad=0.)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-def plot_FMC_vs_D10(df: pd.DataFrame,
-                    title: str = "Final moisture vs D10",
-                    save_path: Optional[str] = None):
-    """
-    Final moisture content (FMC) vs D10.
-    Uses mean D10 / FMC per sample & diaphragm state.
-    Legend labels = Span (D80/D20) per sample.
-    Marker shape encodes diaphragm state:
-        circle = diaphragm on (1)
-        triangle = diaphragm off (0)
-    Separate quadratic trends for dia on/off.
-    """
-    # allow either 'FMC' or 'Mc_%' as the moisture column
-    if "FMC" in df.columns:
-        y_col = "FMC"
-    elif "Mc_%" in df.columns:
-        y_col = "Mc_%"
-    else:
-        raise ValueError("DataFrame must contain either 'FMC' or 'Mc_%' for moisture content.")
-
-    required = {"D10", "D80/D20", y_col, SAMPLE_CODE_COL, "Diaphragm_on"}
-    if not required.issubset(df.columns):
-        raise ValueError(f"DataFrame must contain: {required}")
-
-    df_plot = df[list(required)].copy()
-
-    # numeric columns
-    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
-    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
-    df_plot[y_col] = _get_numeric_1d(df_plot[y_col])
-    df_plot = df_plot.dropna(subset=["D10", y_col, "D80/D20"])
-
-    # ----- diaphragm effect per sample (mean dia on/off) -----
-    stats = (
-        df_plot
-        .groupby([SAMPLE_CODE_COL, "Diaphragm_on"])
-        .agg(D10_mean=("D10", "mean"),
-             Span_mean=("D80/D20", "mean"),
-             FMC_mean=(y_col, "mean"))
-        .reset_index()
-    )
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-
-    # scatter means only, marker by diaphragm state
-    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
-        sub = stats[stats[SAMPLE_CODE_COL] == code]
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-
-        for _, row in sub.iterrows():
-            marker = "o" if row["Diaphragm_on"] == 1 else "^"
-            ax.scatter(
-                row["D10_mean"],
-                row["FMC_mean"],
-                marker=marker,
-                edgecolors="k",
-                alpha=0.9,
-                s=70,
-                c=[colour],
-            )
-
-        # vertical connector line (dia effect) if both states exist
-        if {0, 1}.issubset(set(sub["Diaphragm_on"])):
-            d10_mean = sub["D10_mean"].mean()
-            y0 = sub.loc[sub["Diaphragm_on"] == 0, "FMC_mean"].iloc[0]
-            y1 = sub.loc[sub["Diaphragm_on"] == 1, "FMC_mean"].iloc[0]
-
-            ax.plot(
-                [d10_mean, d10_mean],
-                [y0, y1],
-                color="grey",
-                linewidth=2,
-                alpha=0.8,
-            )
-
-            print(f"{code}: ?FMC (dia - no dia) = {y1 - y0:.2f} %")
-
-    # ----- trend lines (quadratic, per dia state) -----
-    stats_on = stats[stats["Diaphragm_on"] == 1]
-    stats_off = stats[stats["Diaphragm_on"] == 0]
-
-    if len(stats_on) >= 3:
-        x_on = stats_on["D10_mean"].to_numpy(dtype=float)
-        y_on = stats_on["FMC_mean"].to_numpy(dtype=float)
-        coeffs_on = np.polyfit(x_on, y_on, deg=2)
-        x_fit_on = np.linspace(x_on.min(), x_on.max(), 200)
-        y_fit_on = np.polyval(coeffs_on, x_fit_on)
-        ax.plot(x_fit_on, y_fit_on,
-                color="black", linewidth=2, linestyle="--",
-                label="Trend (Dia on)")
-
-    if len(stats_off) >= 3:
-        x_off = stats_off["D10_mean"].to_numpy(dtype=float)
-        y_off = stats_off["FMC_mean"].to_numpy(dtype=float)
-        coeffs_off = np.polyfit(x_off, y_off, deg=2)
-        x_fit_off = np.linspace(x_off.min(), x_off.max(), 200)
-        y_fit_off = np.polyval(coeffs_off, x_fit_off)
-        ax.plot(x_fit_off, y_fit_off,
-                color="black", linewidth=2, linestyle=":",
-                label="Trend (Dia off)")
-
-    ax.set_xlabel("D10 (\u00B5m)")
-    ax.set_ylabel("Final moisture content (%)")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-
-    # force axes to start at zero
-    ax.set_xlim(left=0)
-    ax.set_ylim(bottom=0)
-
-    # legend: label by Span (mean Span per sample)
-    span_by_code = (
-        stats
-        .groupby(SAMPLE_CODE_COL)["Span_mean"]
-        .mean()
-    )
-
-    legend_handles = []
-    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-        span_val = span_by_code.loc[code]
-        label = f"Span={span_val:.2f}"
-        legend_handles.append(
-            Line2D([0], [0], marker="o", color="none",
-                   markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=label)
-        )
-
-    # marker-shape legend for diaphragm state
-    dia_on_handle = Line2D([0], [0], marker="o", color="none",
-                           markerfacecolor="lightgrey", markeredgecolor="k",
-                           markersize=7, label="Dia on")
-    dia_off_handle = Line2D([0], [0], marker="^", color="none",
-                            markerfacecolor="lightgrey", markeredgecolor="k",
-                            markersize=7, label="Dia off")
-    legend_handles.extend([dia_on_handle, dia_off_handle])
-
-    # trend legend
-    if len(stats_on) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend (Dia on)")
-        )
-    if len(stats_off) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle=":",
-                   label="Trend (Dia off)")
-        )
-
-    ax.legend(handles=legend_handles,
-              bbox_to_anchor=(1.02, 1),
-              loc="upper left", borderaxespad=0.)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-
-def plot_FMC_vs_Span(df: pd.DataFrame,
-                     title: str = "Final moisture vs Span",
-                     save_path: Optional[str] = None):
-    """
-    Final moisture content (FMC) vs Span (D80/D20).
-    Uses mean Span / FMC per sample & diaphragm state.
-    Legend labels = D10 per sample.
-    Marker shape encodes diaphragm state:
-        circle = diaphragm on (1)
-        triangle = diaphragm off (0)
-    Separate quadratic trends for dia on/off.
-    """
-    # allow either 'FMC' or 'Mc_%' as the moisture column
-    if "FMC" in df.columns:
-        y_col = "FMC"
-    elif "Mc_%" in df.columns:
-        y_col = "Mc_%"
-    else:
-        raise ValueError("DataFrame must contain either 'FMC' or 'Mc_%' for moisture content.")
-
-    required = {"D80/D20", "D10", y_col, SAMPLE_CODE_COL, "Diaphragm_on"}
-    if not required.issubset(df.columns):
-        raise ValueError(f"DataFrame must contain: {required}")
-
-    df_plot = df[list(required)].copy()
-
-    df_plot["D80/D20"] = pd.to_numeric(df_plot["D80/D20"], errors="coerce")
-    df_plot["D10"] = pd.to_numeric(df_plot["D10"], errors="coerce")
-    df_plot[y_col] = _get_numeric_1d(df_plot[y_col])
-    df_plot = df_plot.dropna(subset=["D80/D20", y_col, "D10"])
-
-    # ----- diaphragm effect per sample (mean dia on/off) -----
-    stats = (
-        df_plot
-        .groupby([SAMPLE_CODE_COL, "Diaphragm_on"])
-        .agg(Span_mean=("D80/D20", "mean"),
-             D10_mean=("D10", "mean"),
-             FMC_mean=(y_col, "mean"))
-        .reset_index()
-    )
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-
-    # scatter means only, marker by diaphragm state
-    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
-        sub = stats[stats[SAMPLE_CODE_COL] == code]
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-
-        for _, row in sub.iterrows():
-            marker = "o" if row["Diaphragm_on"] == 1 else "^"
-            ax.scatter(
-                row["Span_mean"],
-                row["FMC_mean"],
-                marker=marker,
-                edgecolors="k",
-                alpha=0.9,
-                s=70,
-                c=[colour],
-            )
-
-        # vertical connector line (dia effect) if both states exist
-        if {0, 1}.issubset(set(sub["Diaphragm_on"])):
-            span_mean = sub["Span_mean"].mean()
-            y0 = sub.loc[sub["Diaphragm_on"] == 0, "FMC_mean"].iloc[0]
-            y1 = sub.loc[sub["Diaphragm_on"] == 1, "FMC_mean"].iloc[0]
-
-            ax.plot(
-                [span_mean, span_mean],
-                [y0, y1],
-                color="grey",
-                linewidth=2,
-                alpha=0.8,
-            )
-
-            print(f"{code}: ?FMC (dia - no dia) = {y1 - y0:.2f} %")
-
-    # ----- trend lines (quadratic, per dia state) -----
-    stats_on = stats[stats["Diaphragm_on"] == 1]
-    stats_off = stats[stats["Diaphragm_on"] == 0]
-
-    if len(stats_on) >= 3:
-        x_on = stats_on["Span_mean"].to_numpy(dtype=float)
-        y_on = stats_on["FMC_mean"].to_numpy(dtype=float)
-        coeffs_on = np.polyfit(x_on, y_on, deg=2)
-        x_fit_on = np.linspace(x_on.min(), x_on.max(), 200)
-        y_fit_on = np.polyval(coeffs_on, x_fit_on)
-        ax.plot(x_fit_on, y_fit_on,
-                color="black", linewidth=2, linestyle="--",
-                label="Trend (Dia on)")
-
-    if len(stats_off) >= 3:
-        x_off = stats_off["Span_mean"].to_numpy(dtype=float)
-        y_off = stats_off["FMC_mean"].to_numpy(dtype=float)
-        coeffs_off = np.polyfit(x_off, y_off, deg=2)
-        x_fit_off = np.linspace(x_off.min(), x_off.max(), 200)
-        y_fit_off = np.polyval(coeffs_off, x_fit_off)
-        ax.plot(x_fit_off, y_fit_off,
-                color="black", linewidth=2, linestyle=":",
-                label="Trend (Dia off)")
-
-    ax.set_xlabel("Span (D80/D20)")
-    ax.set_ylabel("Final moisture content (%)")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-
-    # force axes to start at zero
-    ax.set_xlim(left=0)
-    ax.set_ylim(bottom=0)
-
-    # legend: label by D10 (mean per sample)
-    d10_by_code = (
-        stats
-        .groupby(SAMPLE_CODE_COL)["D10_mean"]
-        .mean()
-    )
-
-    legend_handles = []
-    for code in sorted(stats[SAMPLE_CODE_COL].unique()):
-        colour = SAMPLE_COLOUR_MAP.get(code, DEFAULT_OTHER_COLOUR)
-        d10_val = d10_by_code.loc[code]
-        label = f"D10={d10_val:.1f} \u00B5m"
-        legend_handles.append(
-            Line2D([0], [0], marker="o", color="none",
-                   markerfacecolor=colour, markeredgecolor="k",
-                   markersize=7, label=label)
-        )
-
-    # marker-shape legend for diaphragm state
-    dia_on_handle = Line2D([0], [0], marker="o", color="none",
-                           markerfacecolor="lightgrey", markeredgecolor="k",
-                           markersize=7, label="Dia on")
-    dia_off_handle = Line2D([0], [0], marker="^", color="none",
-                            markerfacecolor="lightgrey", markeredgecolor="k",
-                            markersize=7, label="Dia off")
-    legend_handles.extend([dia_on_handle, dia_off_handle])
-
-    # trend legend
-    if len(stats_on) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle="--",
-                   label="Trend (Dia on)")
-        )
-    if len(stats_off) >= 3:
-        legend_handles.append(
-            Line2D([0], [0], color="black", linestyle=":",
-                   label="Trend (Dia off)")
-        )
-
-    ax.legend(handles=legend_handles,
-              bbox_to_anchor=(1.02, 1),
-              loc="upper left", borderaxespad=0.)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-
-
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
-
-def main():
     
-    parser = argparse.ArgumentParser(
-        description="Empirical FMC figures vs D10, Span and diaphragm (no models).",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent(
-            """
-            Examples:
-              python empirical_figs.py
-              python empirical_figs.py path_to_file.xlsx
-            """
-        ),
-    )
-    parser.add_argument(
-        "xlsx_path",
-        nargs="?",
-        default=DEFAULT_XLSX_PATH,
-        help=f"Path to Excel workbook (default: {DEFAULT_XLSX_PATH})",
-    )
-    parser.add_argument("--sheet_db", default=DB_SHEET)
-    parser.add_argument("--sheet_psd", default=PSD_SHEET)
+    df = pd.read_excel(file_path, sheet_name=sheet_name)
+    size_cols = _get_size_columns(df)
 
-    args = parser.parse_args()
+    print("Detected size columns (first 10 shown):", size_cols[:10])
+    print("Number of size columns:", len(size_cols))
 
-    print(f"\nUsing Excel file:\n  {args.xlsx_path}\n")
+    results: list[dict[str, Any]] = []
 
-    df_db_raw, df_psd = load_sheets(args.xlsx_path, args.sheet_db, args.sheet_psd)
-    df_db_inc = apply_flag_filter(df_db_raw)
+    for s in sample_codes:
+        sub = df[df[COL_SAMPLE] == s]
+        if sub.empty:
+            print(f"[WARN] Sample '{s}' not found in {sheet_name}. Skipping.")
+            continue
 
-    df = merge_db_psd_empirical(df_db_inc, df_psd)
-    print(f"Usable empirical rows after merge & filtering: {len(df)}\n")
+        row = sub.iloc[0]
 
-    # ---- Make figures (all using the same df) ----
-    plot_FT_vs_D10(df)
-    plot_FT_vs_Span(df)
-    plot_AT_vs_D10(df)
-    plot_AT_vs_Span(df)
-    plot_FMC_vs_D10(df, title="Final Moisture vs D10")
-    plot_FMC_vs_Span(df, title="Final Moisture vs Span")
-    plot_interaction_d10_diaphragm(df)
-    plot_interaction_span_diaphragm(df)
-    plot_boxplot_d10_classes(df)
-    plot_d10_span_scatter(df)
-    plot_allpoints_d10_vs_span(
-        df,
-        target_col=TARGET_COL,
-        title="D10 vs Span coloured by FMC",
-        save_path=None,
-    )
-    plot_allpoints_d10_vs_span_separated(
-        df,
-        target_col=TARGET_COL,
-        title_base="D10 vs Span coloured by FMC",
-        save_path_base=None,
-    )
-    
+        # Skip samples with zero PSD total
+        total_psd = row[size_cols].astype(float).sum()
+        if total_psd <= 0:
+            print(f"[WARN] Sample '{s}' has zero/empty PSD data. Skipping.")
+            continue
+
+        # Build discrete PDF
+        d, p = _discrete_pdf_from_row(row, size_cols)
+
+        gmm_info = _fit_gmm_logspace(d, p, max_components=3)
+
+        # Plot PSD + GMM (full mixture)
+        _plot_psd_and_gmm(s, d, p, gmm_info)
+
+        # Full-component stats
+        means_um = 10 ** gmm_info["means_log10"]
+        weights = gmm_info["weights"]
+
+        # Effective-mode stats
+        eff_means_um = 10 ** gmm_info["eff_means_log10"]
+        eff_weights = gmm_info["eff_weights"]
+
+        print(f"\nSample: {s}")
+        print(f"  BIC-chosen K (raw)       = {gmm_info['K']}")
+        print(f"  Raw centres (\u00B5m)         = {np.round(means_um, 3)}")
+        print(f"  Raw weights (?_k)        = {np.round(weights, 3)}")
+        print(f"  Effective K (K_eff)      = {gmm_info['K_eff']}")
+        print(f"  Effective centres (\u00B5m)   = {np.round(eff_means_um, 3)}")
+        print(f"  Effective weights (?_k)  = {np.round(eff_weights, 3)}")
+        print(f"  Ashman D (dominant modes, log10) = {gmm_info['ashman_D_main']:.3f}")
+
+        results.append({
+            "sample": s,
+            "K_raw": gmm_info["K"],
+            "K_eff": gmm_info["K_eff"],
+            "means_um_raw": means_um,
+            "weights_raw": weights,
+            "means_um_eff": eff_means_um,
+            "weights_eff": eff_weights,
+            "ashman_D_log10_main": gmm_info["ashman_D_main"],
+        })
+
+
+
+    if not results:
+        raise RuntimeError("No results produced - check sample codes and data.")
+
+    return pd.DataFrame(results)
 
 
 if __name__ == "__main__":
-    main()
+    metrics_df = run_gmm_psd_analysis()
+    print("\n=== Summary metrics ===")
+    print(metrics_df)
