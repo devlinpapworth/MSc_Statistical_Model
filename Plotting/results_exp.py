@@ -31,6 +31,7 @@ P10 = "D10"
 
 # If your fail column is numeric or uses different tokens, update this:
 FAIL_REGEX = r"(?:fail|failed|no\s*cake|cake\s*fail|break|crack)"
+PUMP_PLOT_CODE = "Pump_plot_code"
 
 
 # -----------------------------
@@ -44,8 +45,8 @@ def to_num(s: pd.Series) -> pd.Series:
 
 def savefig(fig, path: str) -> None:
     fig.tight_layout()
-    fig.savefig(path, dpi=DPI, bbox_inches="tight")
-    plt.close(fig)
+    plt.show()
+
 
 def classify_sample_type(sample_code: str) -> str:
     sc = str(sample_code).strip()
@@ -131,49 +132,101 @@ def load_data() -> pd.DataFrame:
 # one label per sample code
 # -----------------------------
 def plot_dual_axis(df: pd.DataFrame) -> None:
-    def _plot_one(d: pd.DataFrame, tag: str) -> None:
-        d = d.dropna(subset=[P_TIME, P_PRESS, KEY]).copy()
-        d[KEY] = d[KEY].astype(str)
+    # NO diaphragm separation
+    d = df.dropna(subset=[P_TIME, P_PRESS, KEY]).copy()
+    d[KEY] = d[KEY].astype(str)
 
-        sample_codes = sorted(d[KEY].unique().tolist())
+    # underfilled flag (if column missing -> all False)
+    if PUMP_PLOT_CODE in d.columns:
+        underfilled = (
+            d[PUMP_PLOT_CODE]
+            .astype(str)
+            .str.lower()
+            .str.contains("underfilled", na=False)
+        )
+        d["IsUnderfilled"] = underfilled
+    else:
+        d["IsUnderfilled"] = False
 
-        line_styles = ["-", "--", ":", "-."]
-        markers = ["o", "s", "^", "D", "v", "P", "X", "<", ">", "*"]
+    sample_codes = sorted(d[KEY].unique())
+    n = len(sample_codes)
 
-        fig, ax = plt.subplots(figsize=(8.2, 5.0))
+    fig, axes = plt.subplots(
+        nrows=n,
+        ncols=1,
+        figsize=(7.5, 2.2 * n),
+        sharex=True
+    )
 
-        for i, sc in enumerate(sample_codes):
-            dd = d[d[KEY] == sc].sort_values(P_PRESS)
+    if n == 1:
+        axes = [axes]
 
-            ls = line_styles[i % len(line_styles)]
-            mk = markers[i % len(markers)]
+    for ax, sc in zip(axes, sample_codes):
+        dd = d[d[KEY] == sc].copy()
 
+        # trend line EXCLUDES underfilled
+        dd_line = dd[~dd["IsUnderfilled"]].sort_values(P_PRESS)
+
+        if len(dd_line) >= 2:
             ax.plot(
-                dd[P_PRESS].values, dd[P_TIME].values,
-                linestyle=ls, linewidth=1.4,
-                marker=mk, markersize=6,
-                markerfacecolor="none", markeredgecolor="black",
-                color="black", alpha=0.85,
-                label=sc
+                dd_line[P_PRESS],
+                dd_line[P_TIME],
+                marker="o",
+                linestyle="-",
+                markerfacecolor="none",
+                markeredgecolor="black",
+                color="black",
+                linewidth=1.4
+            )
+        elif len(dd_line) == 1:
+            ax.scatter(
+                dd_line[P_PRESS],
+                dd_line[P_TIME],
+                marker="o",
+                facecolors="none",
+                edgecolors="black"
             )
 
-        ax.set_xlabel(r"Pumping pressure $P_P$ (bar)")
-        ax.set_ylabel(r"Pumping time $P_T$ (s)")
-        ax.set_title(f"Pumping screening ({tag}): $P_T$ vs $P_P$")
-        ax.grid(True, alpha=0.25)
+        # UNDERFILLED points (not connected)
+        dd_under = dd[dd["IsUnderfilled"]]
+        if len(dd_under):
+            ax.scatter(
+                dd_under[P_PRESS],
+                dd_under[P_TIME],
+                marker="x",
+                color="black",
+                s=60,
+                linewidths=1.6
+            )
 
-        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, title="Sample (line style)")
-        savefig(fig, os.path.join(OUTDIR, f"01_pumping_PT_vs_PP_line_{tag}.png"))
+        ax.set_ylabel(r"$P_T$ (s)")
+        ax.set_title(sc, loc="left", fontsize=10)
 
-    # Dia ON = STD
-    d_on = df[df["Diaphragm"] == "On"].copy()
-    if len(d_on):
-        _plot_one(d_on, "DiaOn")
+        # ---- Y-axis extension + more intervals ----
+        y0, y1 = ax.get_ylim()
+        pad = 0.08 * (y1 - y0) if (y1 > y0) else 1.0
+        ax.set_ylim(y0 - pad, y1 + pad)
 
-    # Dia OFF = NO_PRES
-    d_off = df[df["Diaphragm"] == "Off"].copy()
-    if len(d_off):
-        _plot_one(d_off, "DiaOff")
+        ax.minorticks_on()
+        ax.tick_params(axis="y", which="major", length=5)
+        ax.tick_params(axis="y", which="minor", length=3)
+
+        ax.grid(True, which="major", alpha=0.35)
+        ax.grid(True, which="minor", alpha=0.18)
+
+    axes[-1].set_xlabel(r"Pumping pressure $P_P$ (bar)")
+    fig.suptitle(
+        "Pumping Tine vs Pumping Pressure",
+        y=0.98
+    )
+
+    savefig(
+        fig,
+        os.path.join(OUTDIR, "01_pumping_PT_vs_PP_subplots_all.png")
+    )
+
+
+
 
 
 
@@ -182,71 +235,104 @@ def plot_dual_axis(df: pd.DataFrame) -> None:
 # Plot 2: Cloth vs FMC
 # marker shape by sample type
 # colour = FAIL (black) / PASS (light grey)
-# -----------------------------
 def plot_cloth_vs_fmc(df: pd.DataFrame) -> None:
-    def _plot_one(d: pd.DataFrame, tag: str) -> None:
-        d = d.dropna(subset=[CLOTH, FMC, KEY]).copy()
-        d[KEY] = d[KEY].astype(str)
+    # single plot, fixed cloth values with equal spacing
+    CLOTH_LEVELS = [130, 150, 230, 250, 260, 350]
+    x_map = {v: i for i, v in enumerate(CLOTH_LEVELS)}
 
-        sample_codes = sorted(d[KEY].unique().tolist())
+    d = df.dropna(subset=[CLOTH, FMC, KEY]).copy()
+    d = d[d[CLOTH].isin(CLOTH_LEVELS)]
+    d[KEY] = d[KEY].astype(str)
 
-        line_styles = ["-", "--", ":", "-."]
-        markers = ["o", "s", "^", "D", "v", "P", "X", "<", ">", "*"]
+    # ---- FMC as percentage ----
+    d[FMC] = d[FMC] * 100.0
 
-        fig, ax = plt.subplots(figsize=(7.6, 4.8))
-        rng = np.random.default_rng(0)
+    sample_codes = sorted(d[KEY].unique())
+    n = len(sample_codes)
 
-        for i, sc in enumerate(sample_codes):
-            dd = d[d[KEY] == sc].sort_values(CLOTH)
+    # ---- 3 x 2 grid ----
+    nrows, ncols = 3, 2
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(9.0, 8.5),
+        sharex=True,
+        sharey=True
+    )
 
-            ls = line_styles[i % len(line_styles)]
-            mk = markers[i % len(markers)]
+    axes = axes.flatten()
+    rng = np.random.default_rng(0)
 
-            # jitter cloth slightly so overlapping cloth values are visible
-            x = dd[CLOTH].values + rng.normal(0, 1.0, size=len(dd))
+    for ax, sc in zip(axes, sample_codes):
+        dd = d[d[KEY] == sc].copy()
 
-            # line (neutral)
-            ax.plot(
-                x, dd[FMC].values,
-                linestyle=ls, linewidth=1.2,
-                color="0.3", alpha=0.75
+        # map cloth sizes to evenly spaced categorical positions
+        x = dd[CLOTH].map(x_map).values
+        x = x + rng.normal(0, 0.04, size=len(x))  # tiny jitter
+
+        # diaphragm ON = black
+        on = dd["Diaphragm"] == "On"
+        if on.any():
+            ax.scatter(
+                x[on],
+                dd.loc[on, FMC],
+                s=60,
+                facecolors="black",
+                edgecolors="black",
+                zorder=3
             )
 
-            # points (colour-coded by fail)
-            pass_mask = ~dd["IsFail"]
-            if pass_mask.any():
-                ax.scatter(
-                    x[pass_mask], dd.loc[pass_mask, FMC].values,
-                    s=65, marker=mk,
-                    facecolors="none", edgecolors="0.6", linewidths=1.2,
-                    alpha=0.95
-                )
+        # diaphragm OFF = hollow grey
+        off = dd["Diaphragm"] == "Off"
+        if off.any():
+            ax.scatter(
+                x[off],
+                dd.loc[off, FMC],
+                s=60,
+                facecolors="none",
+                edgecolors="0.6",
+                linewidths=1.2,
+                zorder=2
+            )
 
-            fail_mask = dd["IsFail"]
-            if fail_mask.any():
-                ax.scatter(
-                    x[fail_mask], dd.loc[fail_mask, FMC].values,
-                    s=65, marker=mk,
-                    facecolors="black", edgecolors="black",
-                    alpha=0.95
-                )
+        ax.set_title(sc, loc="left", fontsize=10)
 
-        ax.set_xlabel(r"Filter cloth ($\mu$m)")
-        ax.set_ylabel("Final moisture content, FMC (%)")
-        ax.set_title(f"Cloth screening ({tag}): FMC vs cloth (black points = FAIL)")
-        ax.grid(True, axis="y", alpha=0.25)
+        # ---- y-axis: more intervals ----
+        ax.minorticks_on()
+        ax.tick_params(axis="y", which="major", length=5)
+        ax.tick_params(axis="y", which="minor", length=3)
 
-        savefig(fig, os.path.join(OUTDIR, f"02_cloth_vs_FMC_line_{tag}.png"))
+        ax.grid(True, axis="y", which="major", alpha=0.35)
+        ax.grid(True, axis="y", which="minor", alpha=0.18)
 
-    # Dia ON
-    d_on = df[df["Diaphragm"] == "On"].copy()
-    if len(d_on):
-        _plot_one(d_on, "DiaOn")
+        # ---- x-axis: NO minor ticks (categorical) ----
+        ax.tick_params(axis="x", which="minor", bottom=False)
 
-    # Dia OFF
-    d_off = df[df["Diaphragm"] == "Off"].copy()
-    if len(d_off):
-        _plot_one(d_off, "DiaOff")
+    # turn off unused axes if fewer than 6 samples
+    for ax in axes[len(sample_codes):]:
+        ax.axis("off")
+
+    # shared axis labels
+    for ax in axes[::ncols]:
+        ax.set_ylabel("FMC (%)")
+
+    for ax in axes[-ncols:]:
+        ax.set_xlabel("Filter cloth number")
+
+    for ax in axes:
+        ax.set_xticks(range(len(CLOTH_LEVELS)))
+        ax.set_xticklabels(CLOTH_LEVELS)
+
+    fig.suptitle("FMC vs Cloth number", y=0.98)
+
+    savefig(
+        fig,
+        os.path.join(OUTDIR, "02_cloth_vs_FMC_subplots_fixedCloth.png")
+    )
+
+
+
+
 
 
 
@@ -258,6 +344,9 @@ def plot_cloth_vs_fmc(df: pd.DataFrame) -> None:
 def plot_fmc_by_samplecode(df: pd.DataFrame) -> None:
     d = df.dropna(subset=[KEY, FMC]).copy()
     d[KEY] = d[KEY].astype(str)
+
+    # ---- FMC as percentage ----
+    d[FMC] = d[FMC] * 100.0
 
     order = sorted(d[KEY].unique().tolist())
     x_map = {sc: i for i, sc in enumerate(order)}
@@ -284,17 +373,142 @@ def plot_fmc_by_samplecode(df: pd.DataFrame) -> None:
     ax.set_xticks(range(len(order)))
     ax.set_xticklabels(order, rotation=90)
     ax.set_xlabel("Sample Code")
-    ax.set_ylabel("Final moisture content, FMC (%)")
-    ax.set_title("FMC by sample code (filled = diaphragm ON, hollow = OFF)")
+    ax.set_ylabel("FMC (%)")
+    ax.set_title("FMC by sample code")
+
+    # ---- y-axis starts at 0 ----
+    ax.set_ylim(bottom=0)
+
     ax.grid(True, axis="y", alpha=0.25)
 
-    handles = [plt.Line2D([0], [0], marker=mm[t], linestyle="",
-                          markerfacecolor="none", markeredgecolor="black", markersize=8)
-               for t in types]
+    handles = [
+        plt.Line2D([0], [0], marker=mm[t], linestyle="",
+                   markerfacecolor="none", markeredgecolor="black", markersize=8)
+        for t in types
+    ]
     ax.legend(handles, types, loc="center left", bbox_to_anchor=(1.02, 0.5),
-              frameon=False, title="Sample type (shape)")
+              frameon=False, title="Sample name")
 
     savefig(fig, os.path.join(OUTDIR, "03_FMC_vs_SampleCode_diaphragmFill.png"))
+
+
+def plot_dual_axis_singlepanel(df: pd.DataFrame) -> None:
+    """
+    Single shared plot:
+      - x = Pumping pressure (P_PRESS)
+      - y = Pumping time (P_TIME)
+      - marker shape = SampleType (same mapping as plot_fmc_by_samplecode)
+      - trend lines exclude underfilled points
+      - underfilled points = black filled markers (not connected)
+    """
+    d = df.dropna(subset=[P_TIME, P_PRESS, KEY]).copy()
+    d[KEY] = d[KEY].astype(str)
+
+    # underfilled flag
+    if PUMP_PLOT_CODE in d.columns:
+        d["IsUnderfilled"] = (
+            d[PUMP_PLOT_CODE]
+            .astype(str)
+            .str.lower()
+            .str.contains("underfilled", na=False)
+        )
+    else:
+        d["IsUnderfilled"] = False
+
+    # same marker mapping as FMC plot
+    types = sorted(d["SampleType"].unique().tolist())
+    mm = marker_map(types)
+
+    fig, ax = plt.subplots(figsize=(8.5, 5.4))
+
+    for t in types:
+        dd = d[d["SampleType"] == t].copy()
+        m = mm[t]
+
+        # ---- trend line (EXCLUDES underfilled) ----
+        dd_line = dd[~dd["IsUnderfilled"]].sort_values(P_PRESS)
+        if len(dd_line) >= 2:
+            ax.plot(
+                dd_line[P_PRESS],
+                dd_line[P_TIME],
+                linestyle="-",
+                linewidth=1.4,
+                color="black",
+                alpha=0.8
+            )
+
+            ax.scatter(
+                dd_line[P_PRESS],
+                dd_line[P_TIME],
+                s=70,
+                marker=m,
+                facecolors="none",
+                edgecolors="black",
+                linewidths=1.2,
+                alpha=0.9
+            )
+
+        elif len(dd_line) == 1:
+            ax.scatter(
+                dd_line[P_PRESS],
+                dd_line[P_TIME],
+                s=70,
+                marker=m,
+                facecolors="none",
+                edgecolors="black",
+                linewidths=1.2
+            )
+
+        # ---- underfilled points (black filled, NOT connected) ----
+        dd_under = dd[dd["IsUnderfilled"]]
+        if len(dd_under):
+            ax.scatter(
+                dd_under[P_PRESS],
+                dd_under[P_TIME],
+                s=70,
+                marker=m,
+                facecolors="black",
+                edgecolors="black",
+                alpha=0.95
+            )
+
+    ax.set_xlabel(r"Pumping pressure (bar)")
+    ax.set_ylabel(r"Pumping Time (s)")
+    ax.set_title("Pumping Time vs Pumping Pressure")
+    ax.grid(True, alpha=0.3)
+
+    # ---- y-axis extension + more intervals ----
+    y0, y1 = ax.get_ylim()
+    pad = 0.08 * (y1 - y0) if (y1 > y0) else 1.0
+    ax.set_ylim(y0 - pad, y1 + pad)
+
+    ax.minorticks_on()
+    ax.tick_params(axis="y", which="major", length=5)
+    ax.tick_params(axis="y", which="minor", length=3)
+    ax.grid(True, which="major", alpha=0.35)
+    ax.grid(True, which="minor", alpha=0.18)
+
+    # legend (same logic as FMC plot)
+    handles = [
+        plt.Line2D(
+            [0], [0],
+            marker=mm[t], linestyle="",
+            markerfacecolor="none",
+            markeredgecolor="black",
+            markersize=8
+        )
+        for t in types
+    ]
+    ax.legend(
+        handles, types,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        frameon=False,
+        title="Sample name"
+    )
+
+    savefig(fig, os.path.join(OUTDIR, "01_pumping_PT_vs_PP_singlepanel_trendlines.png"))
+
 
 
 def main():
@@ -307,6 +521,7 @@ def main():
     print("Fail counts:", df["IsFail"].value_counts(dropna=False))
     print("Diaphragm counts:", df["Diaphragm"].value_counts(dropna=False))
 
+    plot_dual_axis_singlepanel(df)
     plot_dual_axis(df)
     plot_cloth_vs_fmc(df)
     plot_fmc_by_samplecode(df)
